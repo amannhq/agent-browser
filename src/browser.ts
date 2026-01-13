@@ -634,10 +634,33 @@ export class BrowserManager {
     });
     this.cdpPort = null;
 
-    // Create context with viewport and optional headers
+    // Check for auto-load state file
+    let storageState: string | undefined = undefined;
+    if (options.autoStateFilePath) {
+      try {
+        // Verify file exists and is valid JSON
+        const fs = await import('fs');
+        if (fs.existsSync(options.autoStateFilePath)) {
+          const content = fs.readFileSync(options.autoStateFilePath, 'utf8');
+          JSON.parse(content); // Validate JSON
+          storageState = options.autoStateFilePath;
+          if (process.env.AGENT_BROWSER_DEBUG === '1') {
+            console.error(`[DEBUG] Auto-loading session state: ${options.autoStateFilePath}`);
+          }
+        }
+      } catch (err) {
+        // Invalid or corrupted state file - fall back to fresh browser
+        if (process.env.AGENT_BROWSER_DEBUG === '1') {
+          console.error(`[DEBUG] Failed to load state file, starting fresh:`, err);
+        }
+      }
+    }
+
+    // Create context with viewport, optional headers, and optional storage state
     const context = await this.browser.newContext({
       viewport: options.viewport ?? { width: 1280, height: 720 },
       extraHTTPHeaders: options.headers,
+      storageState: storageState,
     });
 
     // Set default timeout to 10 seconds (Playwright default is 30s)

@@ -902,6 +902,7 @@ mod tests {
             headers: None,
             executable_path: None,
             cdp: None,
+            session_name: None,
         }
     }
 

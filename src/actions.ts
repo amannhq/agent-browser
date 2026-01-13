@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import type { Page, Frame } from 'playwright-core';
 import type { BrowserManager } from './browser.js';
 import type {
@@ -1262,9 +1263,29 @@ async function handleStateLoad(
   command: Command & { action: 'state_load'; path: string },
   browser: BrowserManager
 ): Promise<Response> {
-  // Storage state is loaded at context creation
+  // Check if browser is already launched
+  if (browser.isLaunched()) {
+    return errorResponse(
+      command.id,
+      'Cannot load state while browser is running. Close browser first, then relaunch with loaded state.'
+    );
+  }
+
+  // Validate file exists
+  if (!fs.existsSync(command.path)) {
+    return errorResponse(command.id, `State file not found: ${command.path}`);
+  }
+
+  // Launch browser with loaded state
+  await browser.launch({
+    id: command.id,
+    action: 'launch',
+    headless: true,
+    autoStateFilePath: command.path,
+  });
+
   return successResponse(command.id, {
-    note: 'Storage state must be loaded at browser launch. Use --state flag.',
+    loaded: true,
     path: command.path,
   });
 }

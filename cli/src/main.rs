@@ -98,6 +98,11 @@ fn main() {
     let flags = parse_flags(&args);
     let clean = clean_args(&args);
 
+    // Export session_name to environment for daemon to pick up
+    if let Some(ref name) = flags.session_name {
+        env::set_var("AGENT_BROWSER_SESSION_NAME", name);
+    }
+
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
 
     if clean.is_empty() {

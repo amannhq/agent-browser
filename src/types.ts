@@ -15,6 +15,8 @@ export interface LaunchCommand extends BaseCommand {
   headers?: Record<string, string>;
   executablePath?: string;
   cdpPort?: number;
+  // Auto-load state file for session persistence
+  autoStateFilePath?: string;
 }
 
 export interface NavigateCommand extends BaseCommand {

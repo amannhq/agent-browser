@@ -13,6 +13,38 @@ const isWindows = process.platform === 'win32';
 let currentSession = process.env.AGENT_BROWSER_SESSION || 'default';
 
 /**
+ * Get the session persistence directory
+ */
+function getSessionsDir(): string {
+  return path.join(os.homedir(), '.agent-browser', 'sessions');
+}
+
+/**
+ * Get the auto-save state file path for current session
+ * Pattern: {SESSION_NAME}-{SESSION_ID}.json
+ */
+function getAutoStateFilePath(sessionName: string, sessionId: string): string | null {
+  if (!sessionName) return null;
+
+  const sessionsDir = getSessionsDir();
+
+  // Ensure directory exists
+  if (!fs.existsSync(sessionsDir)) {
+    fs.mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
+  }
+
+  return path.join(sessionsDir, `${sessionName}-${sessionId}.json`);
+}
+
+/**
+ * Check if auto-state file exists
+ */
+function autoStateFileExists(sessionName: string, sessionId: string): boolean {
+  const filePath = getAutoStateFilePath(sessionName, sessionId);
+  return filePath ? fs.existsSync(filePath) : false;
+}
+
+/**
  * Set the current session
  */
 export function setSession(session: string): void {
@@ -158,16 +190,61 @@ export async function startDaemon(): Promise<void> {
             parseResult.command.action !== 'launch' &&
             parseResult.command.action !== 'close'
           ) {
+            // Check for auto-load state
+            const sessionName = process.env.AGENT_BROWSER_SESSION_NAME;
+            const sessionId = process.env.AGENT_BROWSER_SESSION || 'default';
+            const autoStatePath = sessionName
+              ? getAutoStateFilePath(sessionName, sessionId)
+              : undefined;
+
             await browser.launch({
               id: 'auto',
               action: 'launch',
               headless: true,
               executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
+              autoStateFilePath:
+                autoStatePath && fs.existsSync(autoStatePath) ? autoStatePath : undefined,
             });
+          }
+
+          // Handle explicit launch with auto-load state
+          if (parseResult.command.action === 'launch') {
+            const sessionName = process.env.AGENT_BROWSER_SESSION_NAME;
+            const sessionId = process.env.AGENT_BROWSER_SESSION || 'default';
+
+            if (sessionName && !parseResult.command.autoStateFilePath) {
+              const autoStatePath = getAutoStateFilePath(sessionName, sessionId);
+              if (autoStatePath && fs.existsSync(autoStatePath)) {
+                parseResult.command.autoStateFilePath = autoStatePath;
+              }
+            }
           }
 
           // Handle close command specially
           if (parseResult.command.action === 'close') {
+            // Auto-save state before closing
+            const sessionName = process.env.AGENT_BROWSER_SESSION_NAME;
+            const sessionId = process.env.AGENT_BROWSER_SESSION || 'default';
+
+            if (sessionName && browser.isLaunched()) {
+              const autoStatePath = getAutoStateFilePath(sessionName, sessionId);
+              if (autoStatePath) {
+                try {
+                  await browser.saveStorageState(autoStatePath);
+                  // Set file permissions to owner read/write only (0o600)
+                  fs.chmodSync(autoStatePath, 0o600);
+                  if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                    console.error(`Auto-saved session state: ${autoStatePath}`);
+                  }
+                } catch (err) {
+                  // Non-blocking: don't fail close if save fails
+                  if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                    console.error(`Failed to auto-save session state:`, err);
+                  }
+                }
+              }
+            }
+
             const response = await executeCommand(parseResult.command, browser);
             socket.write(serializeResponse(response) + '\n');
 
