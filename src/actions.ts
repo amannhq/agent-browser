@@ -1,4 +1,6 @@
 import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import type { Page, Frame } from 'playwright-core';
 import type { BrowserManager } from './browser.js';
 import type {
@@ -54,6 +56,10 @@ import type {
   TraceStopCommand,
   HarStopCommand,
   StorageStateSaveCommand,
+  StateListCommand,
+  StateClearCommand,
+  StateShowCommand,
+  StateCleanCommand,
   ConsoleCommand,
   ErrorsCommand,
   KeyboardCommand,
@@ -297,6 +303,14 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleStateSave(command, browser);
       case 'state_load':
         return await handleStateLoad(command, browser);
+      case 'state_list':
+        return await handleStateList(command);
+      case 'state_clear':
+        return await handleStateClear(command);
+      case 'state_show':
+        return await handleStateShow(command);
+      case 'state_clean':
+        return await handleStateClean(command);
       case 'console':
         return await handleConsole(command, browser);
       case 'errors':
@@ -1288,6 +1302,136 @@ async function handleStateLoad(
     loaded: true,
     path: command.path,
   });
+}
+
+// Get the sessions directory (same as in daemon.ts)
+function getSessionsDir(): string {
+  return path.join(os.homedir(), '.agent-browser', 'sessions');
+}
+
+async function handleStateList(command: StateListCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  // Ensure directory exists
+  if (!fs.existsSync(sessionsDir)) {
+    return successResponse(command.id, { files: [] });
+  }
+
+  const files = fs.readdirSync(sessionsDir);
+  const stateFiles = files
+    .filter((f) => f.endsWith('.json'))
+    .map((filename) => {
+      const filepath = path.join(sessionsDir, filename);
+      const stats = fs.statSync(filepath);
+      return {
+        filename,
+        path: filepath,
+        size: stats.size,
+        modified: stats.mtime.toISOString(),
+      };
+    })
+    .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+
+  return successResponse(command.id, { files: stateFiles, directory: sessionsDir });
+}
+
+async function handleStateClear(command: StateClearCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  // Ensure directory exists
+  if (!fs.existsSync(sessionsDir)) {
+    return successResponse(command.id, { deleted: [] });
+  }
+
+  const deleted: string[] = [];
+
+  if (command.all) {
+    // Delete all state files
+    const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
+    for (const file of files) {
+      fs.unlinkSync(path.join(sessionsDir, file));
+      deleted.push(file);
+    }
+  } else if (command.sessionName) {
+    // Delete files matching the session name pattern
+    const files = fs.readdirSync(sessionsDir);
+    for (const file of files) {
+      if (file.startsWith(`${command.sessionName}-`) && file.endsWith('.json')) {
+        fs.unlinkSync(path.join(sessionsDir, file));
+        deleted.push(file);
+      }
+    }
+  }
+
+  return successResponse(command.id, { deleted });
+}
+
+async function handleStateShow(command: StateShowCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+  const filepath = path.join(sessionsDir, command.filename);
+
+  if (!fs.existsSync(filepath)) {
+    return errorResponse(command.id, `State file not found: ${command.filename}`);
+  }
+
+  try {
+    const content = fs.readFileSync(filepath, 'utf-8');
+    const state = JSON.parse(content);
+    const stats = fs.statSync(filepath);
+
+    // Extract summary info from storage state
+    const cookiesCount = state.cookies?.length || 0;
+    const originsCount = state.origins?.length || 0;
+
+    // Get unique domains from cookies
+    const domains = [...new Set((state.cookies || []).map((c: { domain: string }) => c.domain))];
+
+    return successResponse(command.id, {
+      filename: command.filename,
+      path: filepath,
+      size: stats.size,
+      modified: stats.mtime.toISOString(),
+      summary: {
+        cookiesCount,
+        originsCount,
+        domains,
+      },
+      state,
+    });
+  } catch (e) {
+    return errorResponse(command.id, `Failed to parse state file: ${(e as Error).message}`);
+  }
+}
+
+async function handleStateClean(command: StateCleanCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  // Ensure directory exists
+  if (!fs.existsSync(sessionsDir)) {
+    return successResponse(command.id, { deleted: [], keptCount: 0 });
+  }
+
+  const now = Date.now();
+  const maxAge = command.days * 24 * 60 * 60 * 1000; // Convert days to milliseconds
+  const deleted: string[] = [];
+  let keptCount = 0;
+
+  const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
+
+  for (const file of files) {
+    const filepath = path.join(sessionsDir, file);
+    const stats = fs.statSync(filepath);
+    const age = now - stats.mtime.getTime();
+
+    if (age > maxAge) {
+      fs.unlinkSync(filepath);
+      deleted.push(file);
+    } else {
+      keptCount++;
+    }
+  }
+
+  return successResponse(command.id, { deleted, keptCount, days: command.days });
 }
 
 async function handleConsole(command: ConsoleCommand, browser: BrowserManager): Promise<Response> {

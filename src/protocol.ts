@@ -334,6 +334,26 @@ const stateLoadSchema = baseCommandSchema.extend({
   path: z.string().min(1),
 });
 
+const stateListSchema = baseCommandSchema.extend({
+  action: z.literal('state_list'),
+});
+
+const stateClearSchema = baseCommandSchema.extend({
+  action: z.literal('state_clear'),
+  sessionName: z.string().optional(),
+  all: z.boolean().optional(),
+});
+
+const stateShowSchema = baseCommandSchema.extend({
+  action: z.literal('state_show'),
+  filename: z.string().min(1),
+});
+
+const stateCleanSchema = baseCommandSchema.extend({
+  action: z.literal('state_clean'),
+  days: z.number().int().positive(),
+});
+
 const consoleSchema = baseCommandSchema.extend({
   action: z.literal('console'),
   clear: z.boolean().optional(),
@@ -750,6 +770,10 @@ const commandSchema = z.discriminatedUnion('action', [
   harStopSchema,
   stateSaveSchema,
   stateLoadSchema,
+  stateListSchema,
+  stateClearSchema,
+  stateShowSchema,
+  stateCleanSchema,
   consoleSchema,
   errorsSchema,
   keyboardSchema,

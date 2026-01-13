@@ -461,7 +461,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === State ===
         "state" => {
-            const VALID: &[&str] = &["save", "load"];
+            const VALID: &[&str] = &["save", "load", "list", "clear", "show", "clean"];
             match rest.get(0).map(|s| *s) {
                 Some("save") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -477,13 +477,76 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     })?;
                     Ok(json!({ "id": id, "action": "state_load", "path": path }))
                 }
+                Some("list") => {
+                    Ok(json!({ "id": id, "action": "state_list" }))
+                }
+                Some("clear") => {
+                    // state clear [name] or state clear --all
+                    let mut session_name: Option<&str> = None;
+                    let mut all = false;
+                    
+                    let mut i = 1;
+                    while i < rest.len() {
+                        match rest[i] {
+                            "--all" | "-a" => {
+                                all = true;
+                            }
+                            arg if !arg.starts_with('-') => {
+                                session_name = Some(arg);
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    
+                    let mut cmd = json!({ "id": id, "action": "state_clear" });
+                    if all {
+                        cmd["all"] = json!(true);
+                    }
+                    if let Some(name) = session_name {
+                        cmd["sessionName"] = json!(name);
+                    }
+                    Ok(cmd)
+                }
+                Some("show") => {
+                    let filename = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state show".to_string(),
+                        usage: "state show <filename>",
+                    })?;
+                    Ok(json!({ "id": id, "action": "state_show", "filename": filename }))
+                }
+                Some("clean") => {
+                    // state clean --older-than <days>
+                    let mut days: Option<i64> = None;
+                    
+                    let mut i = 1;
+                    while i < rest.len() {
+                        match rest[i] {
+                            "--older-than" => {
+                                if let Some(d) = rest.get(i + 1) {
+                                    days = d.parse().ok();
+                                    i += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    
+                    let days = days.ok_or_else(|| ParseError::MissingArguments {
+                        context: "state clean".to_string(),
+                        usage: "state clean --older-than <days>",
+                    })?;
+                    
+                    Ok(json!({ "id": id, "action": "state_clean", "days": days }))
+                }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "state".to_string(),
-                    usage: "state <save|load> <path>",
+                    usage: "state <save|load|list|clear|show|clean> ...",
                 }),
             }
         }
@@ -1315,5 +1378,83 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, ParseError::MissingArguments { .. }));
         assert!(err.format().contains("get text"));
+    }
+
+    // === State Management Tests ===
+
+    #[test]
+    fn test_state_save() {
+        let cmd = parse_command(&args("state save /tmp/state.json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_save");
+        assert_eq!(cmd["path"], "/tmp/state.json");
+    }
+
+    #[test]
+    fn test_state_load() {
+        let cmd = parse_command(&args("state load /tmp/state.json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_load");
+        assert_eq!(cmd["path"], "/tmp/state.json");
+    }
+
+    #[test]
+    fn test_state_list() {
+        let cmd = parse_command(&args("state list"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_list");
+    }
+
+    #[test]
+    fn test_state_clear_all() {
+        let cmd = parse_command(&args("state clear --all"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_clear");
+        assert_eq!(cmd["all"], true);
+    }
+
+    #[test]
+    fn test_state_clear_session_name() {
+        let cmd = parse_command(&args("state clear myproject"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_clear");
+        assert_eq!(cmd["sessionName"], "myproject");
+    }
+
+    #[test]
+    fn test_state_clear_empty() {
+        let cmd = parse_command(&args("state clear"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_clear");
+        assert!(cmd.get("all").is_none());
+        assert!(cmd.get("sessionName").is_none());
+    }
+
+    #[test]
+    fn test_state_show() {
+        let cmd = parse_command(&args("state show myfile.json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_show");
+        assert_eq!(cmd["filename"], "myfile.json");
+    }
+
+    #[test]
+    fn test_state_show_missing_filename() {
+        let result = parse_command(&args("state show"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_clean() {
+        let cmd = parse_command(&args("state clean --older-than 7"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_clean");
+        assert_eq!(cmd["days"], 7);
+    }
+
+    #[test]
+    fn test_state_clean_missing_days() {
+        let result = parse_command(&args("state clean"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_state_unknown_subcommand() {
+        let result = parse_command(&args("state foo"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::UnknownSubcommand { .. }));
     }
 }
