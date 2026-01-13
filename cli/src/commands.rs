@@ -461,7 +461,7 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === State ===
         "state" => {
-            const VALID: &[&str] = &["save", "load", "list", "clear", "show", "clean"];
+            const VALID: &[&str] = &["save", "load", "list", "clear", "show", "clean", "rename"];
             match rest.get(0).map(|s| *s) {
                 Some("save") => {
                     let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -540,13 +540,27 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     
                     Ok(json!({ "id": id, "action": "state_clean", "days": days }))
                 }
+                Some("rename") => {
+                    let old_name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state rename".to_string(),
+                        usage: "state rename <old-name> <new-name>",
+                    })?;
+                    let new_name = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
+                        context: "state rename".to_string(),
+                        usage: "state rename <old-name> <new-name>",
+                    })?;
+                    // Strip .json extension if provided
+                    let old_name = old_name.trim_end_matches(".json");
+                    let new_name = new_name.trim_end_matches(".json");
+                    Ok(json!({ "id": id, "action": "state_rename", "oldName": old_name, "newName": new_name }))
+                }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "state".to_string(),
-                    usage: "state <save|load|list|clear|show|clean> ...",
+                    usage: "state <save|load|list|clear|show|clean|rename> ...",
                 }),
             }
         }
@@ -1456,5 +1470,30 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, ParseError::UnknownSubcommand { .. }));
+    }
+
+    #[test]
+    fn test_state_rename() {
+        let cmd = parse_command(&args("state rename old-name new-name"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_rename");
+        assert_eq!(cmd["oldName"], "old-name");
+        assert_eq!(cmd["newName"], "new-name");
+    }
+
+    #[test]
+    fn test_state_rename_strips_json_extension() {
+        let cmd =
+            parse_command(&args("state rename old.json new.json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "state_rename");
+        assert_eq!(cmd["oldName"], "old");
+        assert_eq!(cmd["newName"], "new");
+    }
+
+    #[test]
+    fn test_state_rename_missing_args() {
+        let result = parse_command(&args("state rename old-name"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::MissingArguments { .. }));
     }
 }

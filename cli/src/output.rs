@@ -172,6 +172,7 @@ pub fn print_response(resp: &Response, json_mode: bool) {
                     let filename = file.get("filename").and_then(|v| v.as_str()).unwrap_or("");
                     let size = file.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
                     let modified = file.get("modified").and_then(|v| v.as_str()).unwrap_or("");
+                    let encrypted = file.get("encrypted").and_then(|v| v.as_bool()).unwrap_or(false);
                     // Format size
                     let size_str = if size > 1024 {
                         format!("{:.1}KB", size as f64 / 1024.0)
@@ -180,9 +181,18 @@ pub fn print_response(resp: &Response, json_mode: bool) {
                     };
                     // Format date (just show date part)
                     let date_str = modified.split('T').next().unwrap_or(modified);
-                    println!("  {} \x1b[2m({}, {})\x1b[0m", filename, size_str, date_str);
+                    // Show lock icon if encrypted
+                    let enc_str = if encrypted { " [encrypted]" } else { "" };
+                    println!("  {} \x1b[2m({}, {}){}\x1b[0m", filename, size_str, date_str, enc_str);
                 }
             }
+            return;
+        }
+        // State rename
+        if let Some(true) = data.get("renamed").and_then(|v| v.as_bool()) {
+            let old_name = data.get("oldName").and_then(|v| v.as_str()).unwrap_or("");
+            let new_name = data.get("newName").and_then(|v| v.as_str()).unwrap_or("");
+            println!("\x1b[32m✓\x1b[0m Renamed {} -> {}", old_name, new_name);
             return;
         }
         // State clear / clean
@@ -1241,6 +1251,11 @@ State Management:
   state clear [name]         Clear states for session name
   state clear --all          Clear all saved states
   state clean --older-than <days>  Delete old state files
+  state rename <old> <new>   Rename a state file
+
+Environment Variables:
+  AGENT_BROWSER_ENCRYPTION_KEY     64-char hex key for state encryption (AES-256-GCM)
+  AGENT_BROWSER_STATE_EXPIRE_DAYS  Auto-delete states older than N days (default: 30)
 
 Sessions:
   session                    Show current session name

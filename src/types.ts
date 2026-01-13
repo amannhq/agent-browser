@@ -524,6 +524,12 @@ export interface StateCleanCommand extends BaseCommand {
   days: number; // Delete states older than N days
 }
 
+export interface StateRenameCommand extends BaseCommand {
+  action: 'state_rename';
+  oldName: string; // Current filename (without .json extension)
+  newName: string; // New filename (without .json extension)
+}
+
 // Console logs
 export interface ConsoleCommand extends BaseCommand {
   action: 'console';
@@ -824,6 +830,7 @@ export type Command =
   | StateClearCommand
   | StateShowCommand
   | StateCleanCommand
+  | StateRenameCommand
   | ConsoleCommand
   | ErrorsCommand
   | KeyboardCommand

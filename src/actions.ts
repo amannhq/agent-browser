@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import type { Page, Frame } from 'playwright-core';
 import type { BrowserManager } from './browser.js';
 import type {
@@ -60,6 +61,7 @@ import type {
   StateClearCommand,
   StateShowCommand,
   StateCleanCommand,
+  StateRenameCommand,
   ConsoleCommand,
   ErrorsCommand,
   KeyboardCommand,
@@ -311,6 +313,8 @@ export async function executeCommand(command: Command, browser: BrowserManager):
         return await handleStateShow(command);
       case 'state_clean':
         return await handleStateClean(command);
+      case 'state_rename':
+        return await handleStateRename(command);
       case 'console':
         return await handleConsole(command, browser);
       case 'errors':
@@ -1309,6 +1313,139 @@ function getSessionsDir(): string {
   return path.join(os.homedir(), '.agent-browser', 'sessions');
 }
 
+// ============================================
+// State Encryption Utilities (AES-256-GCM)
+// ============================================
+
+const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
+const ENCRYPTION_KEY_ENV = 'AGENT_BROWSER_ENCRYPTION_KEY';
+const IV_LENGTH = 12; // 96 bits for GCM
+const AUTH_TAG_LENGTH = 16; // 128 bits
+
+interface EncryptedPayload {
+  version: 1;
+  encrypted: true;
+  iv: string; // Base64 encoded
+  authTag: string; // Base64 encoded
+  data: string; // Base64 encoded ciphertext
+}
+
+/**
+ * Get encryption key from environment variable.
+ * The key should be a 32-byte (256-bit) hex-encoded string (64 characters).
+ */
+function getEncryptionKey(): Buffer | null {
+  const keyHex = process.env[ENCRYPTION_KEY_ENV];
+  if (!keyHex) return null;
+
+  // Key should be 64 hex chars = 32 bytes = 256 bits
+  if (!/^[a-fA-F0-9]{64}$/.test(keyHex)) {
+    console.warn(
+      `Warning: ${ENCRYPTION_KEY_ENV} should be a 64-character hex string (256 bits). ` +
+        `Generate one with: openssl rand -hex 32`
+    );
+    return null;
+  }
+
+  return Buffer.from(keyHex, 'hex');
+}
+
+/**
+ * Encrypt data using AES-256-GCM.
+ * Returns a JSON structure with iv, authTag, and encrypted data.
+ */
+function encryptData(plaintext: string, key: Buffer): EncryptedPayload {
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
+
+  let encrypted = cipher.update(plaintext, 'utf8');
+  encrypted = Buffer.concat([encrypted, cipher.final()]);
+
+  const authTag = cipher.getAuthTag();
+
+  return {
+    version: 1,
+    encrypted: true,
+    iv: iv.toString('base64'),
+    authTag: authTag.toString('base64'),
+    data: encrypted.toString('base64'),
+  };
+}
+
+/**
+ * Decrypt data using AES-256-GCM.
+ * Returns the decrypted plaintext string.
+ */
+function decryptData(payload: EncryptedPayload, key: Buffer): string {
+  const iv = Buffer.from(payload.iv, 'base64');
+  const authTag = Buffer.from(payload.authTag, 'base64');
+  const encryptedData = Buffer.from(payload.data, 'base64');
+
+  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
+  decipher.setAuthTag(authTag);
+
+  let decrypted = decipher.update(encryptedData);
+  decrypted = Buffer.concat([decrypted, decipher.final()]);
+
+  return decrypted.toString('utf8');
+}
+
+/**
+ * Check if a parsed JSON object is an encrypted payload.
+ */
+function isEncryptedPayload(data: unknown): data is EncryptedPayload {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    'encrypted' in data &&
+    (data as EncryptedPayload).encrypted === true &&
+    'version' in data &&
+    'iv' in data &&
+    'authTag' in data &&
+    'data' in data
+  );
+}
+
+/**
+ * Write state data to file, encrypting if encryption key is available.
+ */
+function writeStateFile(filepath: string, data: object): { encrypted: boolean } {
+  const key = getEncryptionKey();
+  const jsonData = JSON.stringify(data, null, 2);
+
+  if (key) {
+    const encrypted = encryptData(jsonData, key);
+    fs.writeFileSync(filepath, JSON.stringify(encrypted, null, 2));
+    return { encrypted: true };
+  }
+
+  fs.writeFileSync(filepath, jsonData);
+  return { encrypted: false };
+}
+
+/**
+ * Read state data from file, decrypting if necessary.
+ * Throws an error if file is encrypted but no key is available.
+ */
+function readStateFile(filepath: string): { data: object; wasEncrypted: boolean } {
+  const content = fs.readFileSync(filepath, 'utf-8');
+  const parsed = JSON.parse(content);
+
+  if (isEncryptedPayload(parsed)) {
+    const key = getEncryptionKey();
+    if (!key) {
+      throw new Error(
+        `State file is encrypted but ${ENCRYPTION_KEY_ENV} is not set. ` +
+          `Set the environment variable to decrypt.`
+      );
+    }
+    const decrypted = decryptData(parsed, key);
+    return { data: JSON.parse(decrypted), wasEncrypted: true };
+  }
+
+  return { data: parsed, wasEncrypted: false };
+}
+
 async function handleStateList(command: StateListCommand): Promise<Response> {
   const sessionsDir = getSessionsDir();
 
@@ -1323,11 +1460,23 @@ async function handleStateList(command: StateListCommand): Promise<Response> {
     .map((filename) => {
       const filepath = path.join(sessionsDir, filename);
       const stats = fs.statSync(filepath);
+
+      // Check if file is encrypted
+      let encrypted = false;
+      try {
+        const content = fs.readFileSync(filepath, 'utf-8');
+        const parsed = JSON.parse(content);
+        encrypted = isEncryptedPayload(parsed);
+      } catch {
+        // Ignore parse errors
+      }
+
       return {
         filename,
         path: filepath,
         size: stats.size,
         modified: stats.mtime.toISOString(),
+        encrypted,
       };
     })
     .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
@@ -1375,22 +1524,26 @@ async function handleStateShow(command: StateShowCommand): Promise<Response> {
   }
 
   try {
-    const content = fs.readFileSync(filepath, 'utf-8');
-    const state = JSON.parse(content);
+    const { data: state, wasEncrypted } = readStateFile(filepath);
     const stats = fs.statSync(filepath);
 
-    // Extract summary info from storage state
-    const cookiesCount = state.cookies?.length || 0;
-    const originsCount = state.origins?.length || 0;
+    // Extract summary info from storage state (with type assertions)
+    const stateObj = state as {
+      cookies?: Array<{ domain: string }>;
+      origins?: unknown[];
+    };
+    const cookiesCount = stateObj.cookies?.length || 0;
+    const originsCount = stateObj.origins?.length || 0;
 
     // Get unique domains from cookies
-    const domains = [...new Set((state.cookies || []).map((c: { domain: string }) => c.domain))];
+    const domains = [...new Set((stateObj.cookies || []).map((c) => c.domain))];
 
     return successResponse(command.id, {
       filename: command.filename,
       path: filepath,
       size: stats.size,
       modified: stats.mtime.toISOString(),
+      encrypted: wasEncrypted,
       summary: {
         cookiesCount,
         originsCount,
@@ -1432,6 +1585,42 @@ async function handleStateClean(command: StateCleanCommand): Promise<Response> {
   }
 
   return successResponse(command.id, { deleted, keptCount, days: command.days });
+}
+
+async function handleStateRename(command: StateRenameCommand): Promise<Response> {
+  const sessionsDir = getSessionsDir();
+
+  // Validate names - no path traversal, only alphanumeric with dashes/underscores
+  const validNamePattern = /^[a-zA-Z0-9_-]+$/;
+  if (!validNamePattern.test(command.oldName) || !validNamePattern.test(command.newName)) {
+    return errorResponse(
+      command.id,
+      'Invalid name. Use only letters, numbers, dashes, and underscores.'
+    );
+  }
+
+  const oldPath = path.join(sessionsDir, `${command.oldName}.json`);
+  const newPath = path.join(sessionsDir, `${command.newName}.json`);
+
+  // Check source exists
+  if (!fs.existsSync(oldPath)) {
+    return errorResponse(command.id, `State file not found: ${command.oldName}.json`);
+  }
+
+  // Check destination doesn't exist
+  if (fs.existsSync(newPath)) {
+    return errorResponse(command.id, `Destination already exists: ${command.newName}.json`);
+  }
+
+  // Rename the file
+  fs.renameSync(oldPath, newPath);
+
+  return successResponse(command.id, {
+    renamed: true,
+    oldName: `${command.oldName}.json`,
+    newName: `${command.newName}.json`,
+    path: newPath,
+  });
 }
 
 async function handleConsole(command: ConsoleCommand, browser: BrowserManager): Promise<Response> {

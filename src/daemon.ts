@@ -2,6 +2,7 @@ import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import { BrowserManager } from './browser.js';
 import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
 import { executeCommand } from './actions.js';
@@ -11,6 +12,140 @@ const isWindows = process.platform === 'win32';
 
 // Session support - each session gets its own socket/pid
 let currentSession = process.env.AGENT_BROWSER_SESSION || 'default';
+
+// ============================================
+// State Encryption Constants (AES-256-GCM)
+// ============================================
+const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
+const ENCRYPTION_KEY_ENV = 'AGENT_BROWSER_ENCRYPTION_KEY';
+const IV_LENGTH = 12; // 96 bits for GCM
+
+interface EncryptedPayload {
+  version: 1;
+  encrypted: true;
+  iv: string; // Base64 encoded
+  authTag: string; // Base64 encoded
+  data: string; // Base64 encoded ciphertext
+}
+
+/**
+ * Get encryption key from environment variable.
+ */
+function getEncryptionKey(): Buffer | null {
+  const keyHex = process.env[ENCRYPTION_KEY_ENV];
+  if (!keyHex) return null;
+
+  if (!/^[a-fA-F0-9]{64}$/.test(keyHex)) {
+    console.warn(
+      `Warning: ${ENCRYPTION_KEY_ENV} should be a 64-character hex string. ` +
+        `Generate one with: openssl rand -hex 32`
+    );
+    return null;
+  }
+
+  return Buffer.from(keyHex, 'hex');
+}
+
+/**
+ * Encrypt data using AES-256-GCM.
+ */
+function encryptData(plaintext: string, key: Buffer): EncryptedPayload {
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
+
+  let encrypted = cipher.update(plaintext, 'utf8');
+  encrypted = Buffer.concat([encrypted, cipher.final()]);
+
+  return {
+    version: 1,
+    encrypted: true,
+    iv: iv.toString('base64'),
+    authTag: cipher.getAuthTag().toString('base64'),
+    data: encrypted.toString('base64'),
+  };
+}
+
+/**
+ * Decrypt data using AES-256-GCM.
+ */
+function decryptData(payload: EncryptedPayload, key: Buffer): string {
+  const iv = Buffer.from(payload.iv, 'base64');
+  const authTag = Buffer.from(payload.authTag, 'base64');
+  const encryptedData = Buffer.from(payload.data, 'base64');
+
+  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
+  decipher.setAuthTag(authTag);
+
+  let decrypted = decipher.update(encryptedData);
+  decrypted = Buffer.concat([decrypted, decipher.final()]);
+
+  return decrypted.toString('utf8');
+}
+
+/**
+ * Check if data is an encrypted payload.
+ */
+function isEncryptedPayload(data: unknown): data is EncryptedPayload {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    'encrypted' in data &&
+    (data as EncryptedPayload).encrypted === true &&
+    'version' in data &&
+    'iv' in data &&
+    'authTag' in data &&
+    'data' in data
+  );
+}
+
+/**
+ * Save state to file with optional encryption.
+ */
+async function saveStateToFile(
+  browser: BrowserManager,
+  filepath: string
+): Promise<{ encrypted: boolean }> {
+  // First get the storage state from Playwright
+  const context = browser.getContext();
+  if (!context) {
+    throw new Error('No browser context available');
+  }
+
+  const state = await context.storageState();
+  const jsonData = JSON.stringify(state, null, 2);
+
+  const key = getEncryptionKey();
+  if (key) {
+    const encrypted = encryptData(jsonData, key);
+    fs.writeFileSync(filepath, JSON.stringify(encrypted, null, 2));
+    return { encrypted: true };
+  }
+
+  fs.writeFileSync(filepath, jsonData);
+  return { encrypted: false };
+}
+
+/**
+ * Load state from file with automatic decryption.
+ */
+function loadStateFromFile(filepath: string): object {
+  const content = fs.readFileSync(filepath, 'utf-8');
+  const parsed = JSON.parse(content);
+
+  if (isEncryptedPayload(parsed)) {
+    const key = getEncryptionKey();
+    if (!key) {
+      throw new Error(
+        `State file is encrypted but ${ENCRYPTION_KEY_ENV} is not set. ` +
+          `Set the environment variable to decrypt.`
+      );
+    }
+    const decrypted = decryptData(parsed, key);
+    return JSON.parse(decrypted);
+  }
+
+  return parsed;
+}
 
 /**
  * Get the session persistence directory
@@ -42,6 +177,62 @@ function getAutoStateFilePath(sessionName: string, sessionId: string): string | 
 function autoStateFileExists(sessionName: string, sessionId: string): boolean {
   const filePath = getAutoStateFilePath(sessionName, sessionId);
   return filePath ? fs.existsSync(filePath) : false;
+}
+
+// Auto-expiration configuration
+const AUTO_EXPIRE_ENV = 'AGENT_BROWSER_STATE_EXPIRE_DAYS';
+const DEFAULT_EXPIRE_DAYS = 30;
+
+/**
+ * Clean up expired state files (files older than N days).
+ * Called on daemon startup.
+ */
+function cleanupExpiredStates(): void {
+  const expireDaysStr = process.env[AUTO_EXPIRE_ENV];
+  const expireDays = expireDaysStr ? parseInt(expireDaysStr, 10) : DEFAULT_EXPIRE_DAYS;
+
+  // Skip if set to 0 or negative (disabled)
+  if (isNaN(expireDays) || expireDays <= 0) {
+    return;
+  }
+
+  const sessionsDir = getSessionsDir();
+  if (!fs.existsSync(sessionsDir)) {
+    return;
+  }
+
+  const now = Date.now();
+  const maxAge = expireDays * 24 * 60 * 60 * 1000;
+  let deletedCount = 0;
+
+  try {
+    const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
+
+    for (const file of files) {
+      const filepath = path.join(sessionsDir, file);
+      try {
+        const stats = fs.statSync(filepath);
+        const age = now - stats.mtime.getTime();
+
+        if (age > maxAge) {
+          fs.unlinkSync(filepath);
+          deletedCount++;
+        }
+      } catch {
+        // Ignore individual file errors
+      }
+    }
+
+    if (deletedCount > 0 && process.env.AGENT_BROWSER_DEBUG === '1') {
+      console.error(
+        `[DEBUG] Auto-expired ${deletedCount} state file(s) older than ${expireDays} days`
+      );
+    }
+  } catch (err) {
+    if (process.env.AGENT_BROWSER_DEBUG === '1') {
+      console.error(`[DEBUG] Failed to clean up expired states:`, err);
+    }
+  }
 }
 
 /**
@@ -158,6 +349,9 @@ export async function startDaemon(): Promise<void> {
   // Clean up any stale socket
   cleanupSocket();
 
+  // Clean up expired state files on startup
+  cleanupExpiredStates();
+
   const browser = new BrowserManager();
   let shuttingDown = false;
 
@@ -230,11 +424,13 @@ export async function startDaemon(): Promise<void> {
               const autoStatePath = getAutoStateFilePath(sessionName, sessionId);
               if (autoStatePath) {
                 try {
-                  await browser.saveStorageState(autoStatePath);
+                  const { encrypted } = await saveStateToFile(browser, autoStatePath);
                   // Set file permissions to owner read/write only (0o600)
                   fs.chmodSync(autoStatePath, 0o600);
                   if (process.env.AGENT_BROWSER_DEBUG === '1') {
-                    console.error(`Auto-saved session state: ${autoStatePath}`);
+                    console.error(
+                      `Auto-saved session state: ${autoStatePath}${encrypted ? ' (encrypted)' : ''}`
+                    );
                   }
                 } catch (err) {
                   // Non-blocking: don't fail close if save fails

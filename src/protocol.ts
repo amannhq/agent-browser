@@ -354,6 +354,12 @@ const stateCleanSchema = baseCommandSchema.extend({
   days: z.number().int().positive(),
 });
 
+const stateRenameSchema = baseCommandSchema.extend({
+  action: z.literal('state_rename'),
+  oldName: z.string().min(1),
+  newName: z.string().min(1),
+});
+
 const consoleSchema = baseCommandSchema.extend({
   action: z.literal('console'),
   clear: z.boolean().optional(),
@@ -774,6 +780,7 @@ const commandSchema = z.discriminatedUnion('action', [
   stateClearSchema,
   stateShowSchema,
   stateCleanSchema,
+  stateRenameSchema,
   consoleSchema,
   errorsSchema,
   keyboardSchema,

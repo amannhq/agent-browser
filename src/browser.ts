@@ -12,8 +12,55 @@ import {
   type Route,
   type Locator,
 } from 'playwright-core';
+import * as crypto from 'crypto';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
+
+// ============================================
+// State Encryption Utilities (AES-256-GCM)
+// ============================================
+const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
+const ENCRYPTION_KEY_ENV = 'AGENT_BROWSER_ENCRYPTION_KEY';
+
+interface EncryptedPayload {
+  version: 1;
+  encrypted: true;
+  iv: string;
+  authTag: string;
+  data: string;
+}
+
+function getEncryptionKey(): Buffer | null {
+  const keyHex = process.env[ENCRYPTION_KEY_ENV];
+  if (!keyHex || !/^[a-fA-F0-9]{64}$/.test(keyHex)) return null;
+  return Buffer.from(keyHex, 'hex');
+}
+
+function isEncryptedPayload(data: unknown): data is EncryptedPayload {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    'encrypted' in data &&
+    (data as EncryptedPayload).encrypted === true &&
+    'iv' in data &&
+    'authTag' in data &&
+    'data' in data
+  );
+}
+
+function decryptData(payload: EncryptedPayload, key: Buffer): string {
+  const iv = Buffer.from(payload.iv, 'base64');
+  const authTag = Buffer.from(payload.authTag, 'base64');
+  const encryptedData = Buffer.from(payload.data, 'base64');
+
+  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
+  decipher.setAuthTag(authTag);
+
+  let decrypted = decipher.update(encryptedData);
+  decrypted = Buffer.concat([decrypted, decipher.final()]);
+
+  return decrypted.toString('utf8');
+}
 
 interface TrackedRequest {
   url: string;
@@ -575,6 +622,13 @@ export class BrowserManager {
   }
 
   /**
+   * Get the current browser context (first context)
+   */
+  getContext(): BrowserContext | null {
+    return this.contexts[0] ?? null;
+  }
+
+  /**
    * Check if an existing CDP connection is still alive
    * by verifying we can access browser contexts and that at least one has pages
    */
@@ -634,18 +688,56 @@ export class BrowserManager {
     });
     this.cdpPort = null;
 
-    // Check for auto-load state file
-    let storageState: string | undefined = undefined;
+    // Check for auto-load state file (supports encrypted files)
+    // Type matches Playwright's expected storageState parameter
+    let storageState:
+      | string
+      | {
+          cookies: Array<{
+            name: string;
+            value: string;
+            domain: string;
+            path: string;
+            expires: number;
+            httpOnly: boolean;
+            secure: boolean;
+            sameSite: 'Strict' | 'Lax' | 'None';
+          }>;
+          origins: Array<{
+            origin: string;
+            localStorage: Array<{ name: string; value: string }>;
+          }>;
+        }
+      | undefined = undefined;
     if (options.autoStateFilePath) {
       try {
-        // Verify file exists and is valid JSON
         const fs = await import('fs');
         if (fs.existsSync(options.autoStateFilePath)) {
           const content = fs.readFileSync(options.autoStateFilePath, 'utf8');
-          JSON.parse(content); // Validate JSON
-          storageState = options.autoStateFilePath;
-          if (process.env.AGENT_BROWSER_DEBUG === '1') {
-            console.error(`[DEBUG] Auto-loading session state: ${options.autoStateFilePath}`);
+          const parsed = JSON.parse(content);
+
+          // Check if file is encrypted
+          if (isEncryptedPayload(parsed)) {
+            const key = getEncryptionKey();
+            if (key) {
+              const decrypted = decryptData(parsed, key);
+              storageState = JSON.parse(decrypted);
+              if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                console.error(
+                  `[DEBUG] Auto-loading session state (decrypted): ${options.autoStateFilePath}`
+                );
+              }
+            } else {
+              console.error(
+                `[WARN] State file is encrypted but ${ENCRYPTION_KEY_ENV} not set - starting fresh`
+              );
+            }
+          } else {
+            // Plain text file - use file path directly
+            storageState = options.autoStateFilePath;
+            if (process.env.AGENT_BROWSER_DEBUG === '1') {
+              console.error(`[DEBUG] Auto-loading session state: ${options.autoStateFilePath}`);
+            }
           }
         }
       } catch (err) {
