@@ -14,6 +14,17 @@ pub fn print_response(resp: &Response, json_mode: bool) {
         return;
     }
 
+    // Print any warnings first (e.g., decryption failures)
+    if let Some(data) = &resp.data {
+        if let Some(warnings) = data.get("warnings").and_then(|v| v.as_array()) {
+            for warning in warnings {
+                if let Some(msg) = warning.as_str() {
+                    eprintln!("\x1b[33m⚠\x1b[0m {}", msg);
+                }
+            }
+        }
+    }
+
     if let Some(data) = &resp.data {
         // Navigation response
         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {

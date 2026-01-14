@@ -2,101 +2,24 @@ import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import * as crypto from 'crypto';
 import { BrowserManager } from './browser.js';
 import { parseCommand, serializeResponse, errorResponse } from './protocol.js';
 import { executeCommand } from './actions.js';
+import {
+  getSessionsDir,
+  ensureSessionsDir,
+  getEncryptionKey,
+  encryptData,
+  isEncryptedPayload,
+  decryptData,
+  ENCRYPTION_KEY_ENV,
+} from './state-utils.js';
 
 // Platform detection
 const isWindows = process.platform === 'win32';
 
 // Session support - each session gets its own socket/pid
 let currentSession = process.env.AGENT_BROWSER_SESSION || 'default';
-
-// ============================================
-// State Encryption Constants (AES-256-GCM)
-// ============================================
-const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
-const ENCRYPTION_KEY_ENV = 'AGENT_BROWSER_ENCRYPTION_KEY';
-const IV_LENGTH = 12; // 96 bits for GCM
-
-interface EncryptedPayload {
-  version: 1;
-  encrypted: true;
-  iv: string; // Base64 encoded
-  authTag: string; // Base64 encoded
-  data: string; // Base64 encoded ciphertext
-}
-
-/**
- * Get encryption key from environment variable.
- */
-function getEncryptionKey(): Buffer | null {
-  const keyHex = process.env[ENCRYPTION_KEY_ENV];
-  if (!keyHex) return null;
-
-  if (!/^[a-fA-F0-9]{64}$/.test(keyHex)) {
-    console.warn(
-      `Warning: ${ENCRYPTION_KEY_ENV} should be a 64-character hex string. ` +
-        `Generate one with: openssl rand -hex 32`
-    );
-    return null;
-  }
-
-  return Buffer.from(keyHex, 'hex');
-}
-
-/**
- * Encrypt data using AES-256-GCM.
- */
-function encryptData(plaintext: string, key: Buffer): EncryptedPayload {
-  const iv = crypto.randomBytes(IV_LENGTH);
-  const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
-
-  let encrypted = cipher.update(plaintext, 'utf8');
-  encrypted = Buffer.concat([encrypted, cipher.final()]);
-
-  return {
-    version: 1,
-    encrypted: true,
-    iv: iv.toString('base64'),
-    authTag: cipher.getAuthTag().toString('base64'),
-    data: encrypted.toString('base64'),
-  };
-}
-
-/**
- * Decrypt data using AES-256-GCM.
- */
-function decryptData(payload: EncryptedPayload, key: Buffer): string {
-  const iv = Buffer.from(payload.iv, 'base64');
-  const authTag = Buffer.from(payload.authTag, 'base64');
-  const encryptedData = Buffer.from(payload.data, 'base64');
-
-  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
-  decipher.setAuthTag(authTag);
-
-  let decrypted = decipher.update(encryptedData);
-  decrypted = Buffer.concat([decrypted, decipher.final()]);
-
-  return decrypted.toString('utf8');
-}
-
-/**
- * Check if data is an encrypted payload.
- */
-function isEncryptedPayload(data: unknown): data is EncryptedPayload {
-  return (
-    typeof data === 'object' &&
-    data !== null &&
-    'encrypted' in data &&
-    (data as EncryptedPayload).encrypted === true &&
-    'version' in data &&
-    'iv' in data &&
-    'authTag' in data &&
-    'data' in data
-  );
-}
 
 /**
  * Save state to file with optional encryption.
@@ -148,26 +71,12 @@ function loadStateFromFile(filepath: string): object {
 }
 
 /**
- * Get the session persistence directory
- */
-function getSessionsDir(): string {
-  return path.join(os.homedir(), '.agent-browser', 'sessions');
-}
-
-/**
  * Get the auto-save state file path for current session
  * Pattern: {SESSION_NAME}-{SESSION_ID}.json
  */
 function getAutoStateFilePath(sessionName: string, sessionId: string): string | null {
   if (!sessionName) return null;
-
-  const sessionsDir = getSessionsDir();
-
-  // Ensure directory exists
-  if (!fs.existsSync(sessionsDir)) {
-    fs.mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
-  }
-
+  const sessionsDir = ensureSessionsDir();
   return path.join(sessionsDir, `${sessionName}-${sessionId}.json`);
 }
 
@@ -362,10 +271,11 @@ export async function startDaemon(): Promise<void> {
       buffer += data.toString();
 
       // Process complete lines
-      while (buffer.includes('\n')) {
-        const newlineIdx = buffer.indexOf('\n');
-        const line = buffer.substring(0, newlineIdx);
-        buffer = buffer.substring(newlineIdx + 1);
+      // Use indexOf directly instead of includes() + indexOf() to avoid double scan
+      let newlineIdx: number;
+      while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newlineIdx);
+        buffer = buffer.slice(newlineIdx + 1);
 
         if (!line.trim()) continue;
 
@@ -456,6 +366,13 @@ export async function startDaemon(): Promise<void> {
           }
 
           const response = await executeCommand(parseResult.command, browser);
+
+          // Add any launch warnings to the response
+          const warnings = browser.getAndClearWarnings();
+          if (warnings.length > 0 && response.success && response.data) {
+            (response.data as Record<string, unknown>).warnings = warnings;
+          }
+
           socket.write(serializeResponse(response) + '\n');
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);

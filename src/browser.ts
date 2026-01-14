@@ -12,55 +12,14 @@ import {
   type Route,
   type Locator,
 } from 'playwright-core';
-import * as crypto from 'crypto';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
-
-// ============================================
-// State Encryption Utilities (AES-256-GCM)
-// ============================================
-const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
-const ENCRYPTION_KEY_ENV = 'AGENT_BROWSER_ENCRYPTION_KEY';
-
-interface EncryptedPayload {
-  version: 1;
-  encrypted: true;
-  iv: string;
-  authTag: string;
-  data: string;
-}
-
-function getEncryptionKey(): Buffer | null {
-  const keyHex = process.env[ENCRYPTION_KEY_ENV];
-  if (!keyHex || !/^[a-fA-F0-9]{64}$/.test(keyHex)) return null;
-  return Buffer.from(keyHex, 'hex');
-}
-
-function isEncryptedPayload(data: unknown): data is EncryptedPayload {
-  return (
-    typeof data === 'object' &&
-    data !== null &&
-    'encrypted' in data &&
-    (data as EncryptedPayload).encrypted === true &&
-    'iv' in data &&
-    'authTag' in data &&
-    'data' in data
-  );
-}
-
-function decryptData(payload: EncryptedPayload, key: Buffer): string {
-  const iv = Buffer.from(payload.iv, 'base64');
-  const authTag = Buffer.from(payload.authTag, 'base64');
-  const encryptedData = Buffer.from(payload.data, 'base64');
-
-  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
-  decipher.setAuthTag(authTag);
-
-  let decrypted = decipher.update(encryptedData);
-  decrypted = Buffer.concat([decrypted, decipher.final()]);
-
-  return decrypted.toString('utf8');
-}
+import {
+  getEncryptionKey,
+  isEncryptedPayload,
+  decryptData,
+  ENCRYPTION_KEY_ENV,
+} from './state-utils.js';
 
 interface TrackedRequest {
   url: string;
@@ -100,6 +59,16 @@ export class BrowserManager {
   private refMap: RefMap = {};
   private lastSnapshot: string = '';
   private scopedHeaderRoutes: Map<string, (route: Route) => Promise<void>> = new Map();
+  private launchWarnings: string[] = [];
+
+  /**
+   * Get and clear launch warnings (e.g., decryption failures)
+   */
+  getAndClearWarnings(): string[] {
+    const warnings = this.launchWarnings;
+    this.launchWarnings = [];
+    return warnings;
+  }
 
   /**
    * Check if browser is launched
@@ -720,17 +689,28 @@ export class BrowserManager {
           if (isEncryptedPayload(parsed)) {
             const key = getEncryptionKey();
             if (key) {
-              const decrypted = decryptData(parsed, key);
-              storageState = JSON.parse(decrypted);
-              if (process.env.AGENT_BROWSER_DEBUG === '1') {
-                console.error(
-                  `[DEBUG] Auto-loading session state (decrypted): ${options.autoStateFilePath}`
-                );
+              try {
+                const decrypted = decryptData(parsed, key);
+                storageState = JSON.parse(decrypted);
+                if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                  console.error(
+                    `[DEBUG] Auto-loading session state (decrypted): ${options.autoStateFilePath}`
+                  );
+                }
+              } catch (decryptErr) {
+                // Decryption failed - likely wrong key
+                const warning =
+                  'Failed to decrypt state file - wrong encryption key? Starting fresh.';
+                this.launchWarnings.push(warning);
+                console.error(`[WARN] ${warning}`);
+                if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                  console.error(`[DEBUG] Decryption error:`, decryptErr);
+                }
               }
             } else {
-              console.error(
-                `[WARN] State file is encrypted but ${ENCRYPTION_KEY_ENV} not set - starting fresh`
-              );
+              const warning = `State file is encrypted but ${ENCRYPTION_KEY_ENV} not set - starting fresh`;
+              this.launchWarnings.push(warning);
+              console.error(`[WARN] ${warning}`);
             }
           } else {
             // Plain text file - use file path directly

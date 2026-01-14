@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::flags::Flags;
+use crate::validation::{is_valid_session_name, session_name_error};
 
 /// Error type for command parsing with contextual information
 #[derive(Debug)]
@@ -17,6 +18,8 @@ pub enum ParseError {
         context: String,
         usage: &'static str,
     },
+    /// Invalid session name (path traversal or invalid characters)
+    InvalidSessionName { name: String },
 }
 
 impl ParseError {
@@ -40,6 +43,9 @@ impl ParseError {
                     "Missing arguments for: {}\nUsage: agent-browser {}",
                     context, usage
                 )
+            }
+            ParseError::InvalidSessionName { name } => {
+                session_name_error(name)
             }
         }
     }
@@ -499,6 +505,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                         i += 1;
                     }
                     
+                    // Validate session name if provided
+                    if let Some(name) = session_name {
+                        if !is_valid_session_name(name) {
+                            return Err(ParseError::InvalidSessionName { name: name.to_string() });
+                        }
+                    }
+                    
                     let mut cmd = json!({ "id": id, "action": "state_clear" });
                     if all {
                         cmd["all"] = json!(true);
@@ -552,6 +565,15 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                     // Strip .json extension if provided
                     let old_name = old_name.trim_end_matches(".json");
                     let new_name = new_name.trim_end_matches(".json");
+                    
+                    // Validate both session names
+                    if !is_valid_session_name(old_name) {
+                        return Err(ParseError::InvalidSessionName { name: old_name.to_string() });
+                    }
+                    if !is_valid_session_name(new_name) {
+                        return Err(ParseError::InvalidSessionName { name: new_name.to_string() });
+                    }
+                    
                     Ok(json!({ "id": id, "action": "state_rename", "oldName": old_name, "newName": new_name }))
                 }
                 Some(sub) => Err(ParseError::UnknownSubcommand {
@@ -1495,5 +1517,37 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, ParseError::MissingArguments { .. }));
+    }
+
+    #[test]
+    fn test_state_clear_invalid_session_name_path_traversal() {
+        let result = parse_command(&args("state clear ../etc/passwd"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::InvalidSessionName { .. }));
+    }
+
+    #[test]
+    fn test_state_clear_invalid_session_name_special_chars() {
+        let result = parse_command(&args("state clear my@session"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::InvalidSessionName { .. }));
+    }
+
+    #[test]
+    fn test_state_rename_invalid_old_name() {
+        let result = parse_command(&args("state rename ../bad new-name"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::InvalidSessionName { .. }));
+    }
+
+    #[test]
+    fn test_state_rename_invalid_new_name() {
+        let result = parse_command(&args("state rename good-name my/bad"), &default_flags());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ParseError::InvalidSessionName { .. }));
     }
 }
