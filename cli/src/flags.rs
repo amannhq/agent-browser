@@ -1,5 +1,7 @@
 use std::env;
 
+use crate::validation::is_valid_session_name;
+
 pub struct Flags {
     pub json: bool,
     pub full: bool,
@@ -11,13 +13,39 @@ pub struct Flags {
     pub cdp: Option<String>,
     pub extensions: Vec<String>,
     pub proxy: Option<String>,
+    pub session_name: Option<String>,
 }
 
-pub fn parse_flags(args: &[String]) -> Flags {
+/// Result of flag parsing, which may include validation errors
+pub struct ParsedFlags {
+    pub flags: Flags,
+    pub errors: Vec<String>,
+}
+
+pub fn parse_flags(args: &[String]) -> ParsedFlags {
+    let mut errors: Vec<String> = Vec::new();
+    
+    // Parse extensions from environment variable
     let extensions_env = env::var("AGENT_BROWSER_EXTENSIONS")
         .ok()
         .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect::<Vec<_>>())
         .unwrap_or_default();
+    
+    // Validate session_name from environment if present
+    let env_session_name = env::var("AGENT_BROWSER_SESSION_NAME").ok();
+    let validated_env_session_name = if let Some(ref name) = env_session_name {
+        if is_valid_session_name(name) {
+            Some(name.clone())
+        } else {
+            errors.push(format!(
+                "Invalid AGENT_BROWSER_SESSION_NAME '{}'. Only alphanumeric characters, hyphens, and underscores are allowed.",
+                name
+            ));
+            None
+        }
+    } else {
+        None
+    };
 
     let mut flags = Flags {
         json: false,
@@ -30,6 +58,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cdp: None,
         extensions: extensions_env,
         proxy: None,
+        session_name: validated_env_session_name,
     };
 
     let mut i = 0;
@@ -75,11 +104,24 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--session-name" => {
+                if let Some(s) = args.get(i + 1) {
+                    if is_valid_session_name(s) {
+                        flags.session_name = Some(s.clone());
+                    } else {
+                        errors.push(format!(
+                            "Invalid session name '{}'. Only alphanumeric characters, hyphens, and underscores are allowed.",
+                            s
+                        ));
+                    }
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
     }
-    flags
+    ParsedFlags { flags, errors }
 }
 
 pub fn clean_args(args: &[String]) -> Vec<String> {
@@ -89,7 +131,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     // Global flags that should be stripped from command args
     const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug"];
     // Global flags that take a value (need to skip the next arg too)
-    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--cdp", "--extension", "--proxy"];
+    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--cdp", "--extension", "--proxy", "--session-name"];
 
     for arg in args.iter() {
         if skip_next {
@@ -119,8 +161,8 @@ mod tests {
 
     #[test]
     fn test_parse_headers_flag() {
-        let flags = parse_flags(&args(r#"open example.com --headers {"Auth":"token"}"#));
-        assert_eq!(flags.headers, Some(r#"{"Auth":"token"}"#.to_string()));
+        let parsed = parse_flags(&args(r#"open example.com --headers {"Auth":"token"}"#));
+        assert_eq!(parsed.flags.headers, Some(r#"{"Auth":"token"}"#.to_string()));
     }
 
     #[test]
@@ -132,14 +174,14 @@ mod tests {
             "--headers".to_string(),
             r#"{"Authorization": "Bearer token"}"#.to_string(),
         ];
-        let flags = parse_flags(&input);
-        assert_eq!(flags.headers, Some(r#"{"Authorization": "Bearer token"}"#.to_string()));
+        let parsed = parse_flags(&input);
+        assert_eq!(parsed.flags.headers, Some(r#"{"Authorization": "Bearer token"}"#.to_string()));
     }
 
     #[test]
     fn test_parse_no_headers_flag() {
-        let flags = parse_flags(&args("open example.com"));
-        assert!(flags.headers.is_none());
+        let parsed = parse_flags(&args("open example.com"));
+        assert!(parsed.flags.headers.is_none());
     }
 
     #[test]
@@ -176,10 +218,10 @@ mod tests {
             "--json".to_string(),
             "--headed".to_string(),
         ];
-        let flags = parse_flags(&input);
-        assert_eq!(flags.headers, Some(r#"{"Auth":"token"}"#.to_string()));
-        assert!(flags.json);
-        assert!(flags.headed);
+        let parsed = parse_flags(&input);
+        assert_eq!(parsed.flags.headers, Some(r#"{"Auth":"token"}"#.to_string()));
+        assert!(parsed.flags.json);
+        assert!(parsed.flags.headed);
         
         let clean = clean_args(&input);
         assert_eq!(clean, vec!["open", "example.com"]);
@@ -187,14 +229,14 @@ mod tests {
 
     #[test]
     fn test_parse_executable_path_flag() {
-        let flags = parse_flags(&args("--executable-path /path/to/chromium open example.com"));
-        assert_eq!(flags.executable_path, Some("/path/to/chromium".to_string()));
+        let parsed = parse_flags(&args("--executable-path /path/to/chromium open example.com"));
+        assert_eq!(parsed.flags.executable_path, Some("/path/to/chromium".to_string()));
     }
 
     #[test]
     fn test_parse_executable_path_flag_no_value() {
-        let flags = parse_flags(&args("--executable-path"));
-        assert_eq!(flags.executable_path, None);
+        let parsed = parse_flags(&args("--executable-path"));
+        assert_eq!(parsed.flags.executable_path, None);
     }
 
     #[test]
@@ -211,8 +253,22 @@ mod tests {
 
     #[test]
     fn test_parse_flags_with_session_and_executable_path() {
-        let flags = parse_flags(&args("--session test --executable-path /custom/chrome open example.com"));
-        assert_eq!(flags.session, "test");
-        assert_eq!(flags.executable_path, Some("/custom/chrome".to_string()));
+        let parsed = parse_flags(&args("--session test --executable-path /custom/chrome open example.com"));
+        assert_eq!(parsed.flags.session, "test");
+        assert_eq!(parsed.flags.executable_path, Some("/custom/chrome".to_string()));
+    }
+
+    #[test]
+    fn test_invalid_session_name_rejected() {
+        let parsed = parse_flags(&args("--session-name ../bad open example.com"));
+        assert!(!parsed.errors.is_empty());
+        assert!(parsed.flags.session_name.is_none());
+    }
+
+    #[test]
+    fn test_valid_session_name_accepted() {
+        let parsed = parse_flags(&args("--session-name my-project open example.com"));
+        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.flags.session_name, Some("my-project".to_string()));
     }
 }
