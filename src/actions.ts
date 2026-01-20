@@ -513,6 +513,34 @@ async function handleClick(command: ClickCommand, browser: BrowserManager): Prom
   const locator = browser.getLocator(command.selector);
 
   try {
+    // If --new-tab flag is set, get the href and open in a new tab
+    if (command.newTab) {
+      const href = await locator.getAttribute('href');
+      if (!href) {
+        throw new Error(
+          `Element '${command.selector}' does not have an href attribute. --new-tab only works on links.`
+        );
+      }
+
+      // Resolve relative URLs
+      const currentPage = browser.getPage();
+      const baseUrl = currentPage.url();
+      const fullUrl = new URL(href, baseUrl).toString();
+
+      // Create new tab using the BrowserManager's method
+      await browser.newTab();
+
+      // Navigate the new tab to the URL
+      const newPage = browser.getPage();
+      await newPage.goto(fullUrl);
+
+      return successResponse(command.id, {
+        clicked: true,
+        newTab: true,
+        url: fullUrl,
+      });
+    }
+
     await locator.click({
       button: command.button,
       clickCount: command.clickCount,
