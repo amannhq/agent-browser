@@ -35,15 +35,29 @@ export function ensureSessionsDir(): string {
 }
 
 /**
+ * Validate a session ID to prevent path traversal attacks.
+ * Only allows alphanumeric characters, hyphens, and underscores.
+ */
+function isValidSessionId(id: string): boolean {
+  return /^[a-zA-Z0-9_-]+$/.test(id);
+}
+
+/**
  * Get the auto-save state file path for a session.
  * Pattern: {SESSION_NAME}-{SESSION_ID}.json
  *
  * @param sessionName - The session name (e.g., "twitter")
  * @param sessionId - The session ID (e.g., "default" or "agent1")
  * @returns Full path to the state file, or null if sessionName is empty
+ * @throws Error if sessionId contains invalid characters (path traversal prevention)
  */
 export function getAutoStateFilePath(sessionName: string, sessionId: string): string | null {
   if (!sessionName) return null;
+  if (!isValidSessionId(sessionId)) {
+    throw new Error(
+      `Invalid session ID '${sessionId}'. Only alphanumeric characters, hyphens, and underscores are allowed.`
+    );
+  }
   const sessionsDir = ensureSessionsDir();
   return path.join(sessionsDir, `${sessionName}-${sessionId}.json`);
 }

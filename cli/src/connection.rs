@@ -165,7 +165,7 @@ pub struct DaemonResult {
     pub already_running: bool,
 }
 
-pub fn ensure_daemon(session: &str, headed: bool, executable_path: Option<&str>, session_name: Option<&str>) -> Result<DaemonResult, String> {
+pub fn ensure_daemon(session: &str, headed: bool, executable_path: Option<&str>, session_name: Option<&str>, extensions: &[String]) -> Result<DaemonResult, String> {
     if is_daemon_running(session) && daemon_ready(session) {
         return Ok(DaemonResult {
             already_running: true,
@@ -215,6 +215,11 @@ pub fn ensure_daemon(session: &str, headed: bool, executable_path: Option<&str>,
             cmd.env("AGENT_BROWSER_SESSION_NAME", name);
         }
 
+        // Forward extensions if specified
+        if !extensions.is_empty() {
+            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
+        }
+
         // Forward encryption key if set
         if let Ok(key) = env::var("AGENT_BROWSER_ENCRYPTION_KEY") {
             cmd.env("AGENT_BROWSER_ENCRYPTION_KEY", key);
@@ -262,6 +267,11 @@ pub fn ensure_daemon(session: &str, headed: bool, executable_path: Option<&str>,
 
         if let Some(name) = session_name {
             cmd.env("AGENT_BROWSER_SESSION_NAME", name);
+        }
+
+        // Forward extensions if specified
+        if !extensions.is_empty() {
+            cmd.env("AGENT_BROWSER_EXTENSIONS", extensions.join(","));
         }
 
         // Forward encryption key if set
