@@ -39,6 +39,7 @@ export interface ClickCommand extends BaseCommand {
   button?: 'left' | 'right' | 'middle';
   clickCount?: number;
   delay?: number;
+  newTab?: boolean;
 }
 
 export interface TypeCommand extends BaseCommand {
