@@ -15,6 +15,13 @@ export interface LaunchCommand extends BaseCommand {
   headers?: Record<string, string>;
   executablePath?: string;
   cdpPort?: number;
+  extensions?: string[];
+  proxy?: {
+    server: string;
+    bypass?: string;
+    username?: string;
+    password?: string;
+  };
   // Auto-load state file for session persistence
   autoStateFilePath?: string;
 }
@@ -311,6 +318,12 @@ export interface BoundingBoxCommand extends BaseCommand {
   selector: string;
 }
 
+// Computed styles
+export interface StylesCommand extends BaseCommand {
+  action: 'styles';
+  selector: string;
+}
+
 // More semantic locators
 export interface GetByAltTextCommand extends BaseCommand {
   action: 'getbyalttext';
@@ -460,7 +473,50 @@ export interface ResponseBodyCommand extends BaseCommand {
   timeout?: number;
 }
 
-// Video recording
+// Screencast commands for streaming browser viewport
+export interface ScreencastStartCommand extends BaseCommand {
+  action: 'screencast_start';
+  format?: 'jpeg' | 'png';
+  quality?: number; // 0-100, jpeg only
+  maxWidth?: number;
+  maxHeight?: number;
+  everyNthFrame?: number;
+}
+
+export interface ScreencastStopCommand extends BaseCommand {
+  action: 'screencast_stop';
+}
+
+// Input injection commands for pair browsing
+export interface InputMouseCommand extends BaseCommand {
+  action: 'input_mouse';
+  type: 'mousePressed' | 'mouseReleased' | 'mouseMoved' | 'mouseWheel';
+  x: number;
+  y: number;
+  button?: 'left' | 'right' | 'middle' | 'none';
+  clickCount?: number;
+  deltaX?: number;
+  deltaY?: number;
+  modifiers?: number;
+}
+
+export interface InputKeyboardCommand extends BaseCommand {
+  action: 'input_keyboard';
+  type: 'keyDown' | 'keyUp' | 'char';
+  key?: string;
+  code?: string;
+  text?: string;
+  modifiers?: number;
+}
+
+export interface InputTouchCommand extends BaseCommand {
+  action: 'input_touch';
+  type: 'touchStart' | 'touchEnd' | 'touchMove' | 'touchCancel';
+  touchPoints: Array<{ x: number; y: number; id?: number }>;
+  modifiers?: number;
+}
+
+// Video recording (Playwright native - requires launch-time setup)
 export interface VideoStartCommand extends BaseCommand {
   action: 'video_start';
   path: string;
@@ -468,6 +524,23 @@ export interface VideoStartCommand extends BaseCommand {
 
 export interface VideoStopCommand extends BaseCommand {
   action: 'video_stop';
+}
+
+// Screen recording (Playwright native - creates fresh recording context)
+export interface RecordingStartCommand extends BaseCommand {
+  action: 'recording_start';
+  path: string;
+  url?: string;
+}
+
+export interface RecordingStopCommand extends BaseCommand {
+  action: 'recording_stop';
+}
+
+export interface RecordingRestartCommand extends BaseCommand {
+  action: 'recording_restart';
+  path: string;
+  url?: string;
 }
 
 // Tracing
@@ -734,6 +807,7 @@ export interface CloseCommand extends BaseCommand {
 // Tab/Window commands
 export interface TabNewCommand extends BaseCommand {
   action: 'tab_new';
+  url?: string;
 }
 
 export interface TabListCommand extends BaseCommand {
@@ -818,8 +892,12 @@ export type Command =
   | IsCheckedCommand
   | CountCommand
   | BoundingBoxCommand
+  | StylesCommand
   | VideoStartCommand
   | VideoStopCommand
+  | RecordingStartCommand
+  | RecordingStopCommand
+  | RecordingRestartCommand
   | TraceStartCommand
   | TraceStopCommand
   | HarStartCommand
@@ -875,7 +953,12 @@ export type Command =
   | InsertTextCommand
   | MultiSelectCommand
   | WaitForDownloadCommand
-  | ResponseBodyCommand;
+  | ResponseBodyCommand
+  | ScreencastStartCommand
+  | ScreencastStopCommand
+  | InputMouseCommand
+  | InputKeyboardCommand
+  | InputTouchCommand;
 
 // Response types
 export interface SuccessResponse<T = unknown> {
@@ -941,6 +1024,60 @@ export interface TabSwitchData {
 export interface TabCloseData {
   closed: number;
   remaining: number;
+}
+
+export interface ScreencastStartData {
+  started: boolean;
+  format: string;
+  quality: number;
+}
+
+export interface ScreencastStopData {
+  stopped: boolean;
+}
+
+export interface RecordingStartData {
+  started: boolean;
+  path: string;
+}
+
+export interface RecordingStopData {
+  path: string;
+  frames: number;
+  error?: string;
+}
+
+export interface RecordingRestartData {
+  started: boolean;
+  path: string;
+  previousPath?: string;
+  stopped: boolean;
+}
+
+export interface InputEventData {
+  injected: boolean;
+}
+
+// Element styles data
+export interface ElementStyleInfo {
+  tag: string;
+  text: string | null;
+  box: { x: number; y: number; width: number; height: number };
+  styles: {
+    fontSize: string;
+    fontWeight: string;
+    fontFamily: string;
+    color: string;
+    backgroundColor: string;
+    borderRadius: string;
+    border: string | null;
+    boxShadow: string | null;
+    padding: string;
+  };
+}
+
+export interface StylesData {
+  elements: ElementStyleInfo[];
 }
 
 // Browser state

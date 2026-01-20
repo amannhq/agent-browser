@@ -1,3 +1,4 @@
+mod color;
 mod commands;
 mod connection;
 mod flags;
@@ -22,7 +23,37 @@ use commands::{gen_id, parse_command, ParseError};
 use connection::{ensure_daemon, send_command};
 use flags::{clean_args, parse_flags};
 use install::run_install;
-use output::{print_command_help, print_help, print_response};
+use output::{print_command_help, print_help, print_response, print_version};
+
+fn parse_proxy(proxy_str: &str) -> serde_json::Value {
+    let Some(protocol_end) = proxy_str.find("://") else {
+        return json!({ "server": proxy_str });
+    };
+    let protocol = &proxy_str[..protocol_end + 3];
+    let rest = &proxy_str[protocol_end + 3..];
+
+    let Some(at_pos) = rest.rfind('@') else {
+        return json!({ "server": proxy_str });
+    };
+
+    let creds = &rest[..at_pos];
+    let server_part = &rest[at_pos + 1..];
+    let server = format!("{}{}", protocol, server_part);
+
+    let Some(colon_pos) = creds.find(':') else {
+        return json!({
+            "server": server,
+            "username": creds,
+            "password": ""
+        });
+    };
+
+    json!({
+        "server": server,
+        "username": &creds[..colon_pos],
+        "password": &creds[colon_pos + 1..]
+    })
+}
 
 fn run_session(args: &[String], session: &str, json_mode: bool) {
     let subcommand = args.get(1).map(|s| s.as_str());
@@ -78,7 +109,7 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
             } else {
                 println!("Active sessions:");
                 for s in &sessions {
-                    let marker = if s == session { "→" } else { " " };
+                    let marker = if s == session { color::cyan("→") } else { " ".to_string() };
                     println!("{} {}", marker, s);
                 }
             }
@@ -95,6 +126,12 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
 }
 
 fn main() {
+    // Ignore SIGPIPE to prevent panic when piping to head/tail
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let args: Vec<String> = env::args().skip(1).collect();
     let parsed = parse_flags(&args);
     let flags = parsed.flags;
@@ -114,11 +151,7 @@ fn main() {
     }
 
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
-
-    if clean.is_empty() {
-        print_help();
-        return;
-    }
+    let has_version = args.iter().any(|a| a == "--version" || a == "-V");
 
     if has_help {
         if let Some(cmd) = clean.get(0) {
@@ -126,6 +159,16 @@ fn main() {
                 return;
             }
         }
+        print_help();
+        return;
+    }
+
+    if has_version {
+        print_version();
+        return;
+    }
+
+    if clean.is_empty() {
         print_help();
         return;
     }
@@ -159,7 +202,7 @@ fn main() {
                     error_type
                 );
             } else {
-                eprintln!("\x1b[31m{}\x1b[0m", e.format());
+                eprintln!("{}", color::red(&e.format()));
             }
             exit(1);
         }
@@ -171,16 +214,21 @@ fn main() {
             if flags.json {
                 println!(r#"{{"success":false,"error":"{}"}}"#, e);
             } else {
-                eprintln!("\x1b[31m✗\x1b[0m {}", e);
+                eprintln!("{} {}", color::error_indicator(), e);
             }
             exit(1);
         }
     };
 
     // Warn if executable_path was specified but daemon was already running
-    if daemon_result.already_running && flags.executable_path.is_some() {
+    if daemon_result.already_running && (flags.executable_path.is_some() || !flags.extensions.is_empty()) {
         if !flags.json {
-            eprintln!("\x1b[33m⚠\x1b[0m --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.");
+            if flags.executable_path.is_some() {
+                eprintln!("{} --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.", color::warning_indicator());
+            }
+            if !flags.extensions.is_empty() {
+                eprintln!("{} --extension ignored: daemon already running. Use 'agent-browser close' first to restart with extensions.", color::warning_indicator());
+            }
         }
     }
 
@@ -192,7 +240,7 @@ fn main() {
                 if flags.json {
                     println!(r#"{{"success":false,"error":"{}"}}"#, msg);
                 } else {
-                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                    eprintln!("{} {}", color::error_indicator(), msg);
                 }
                 exit(1);
             }
@@ -201,7 +249,7 @@ fn main() {
                 if flags.json {
                     println!(r#"{{"success":false,"error":"{}"}}"#, msg);
                 } else {
-                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                    eprintln!("{} {}", color::error_indicator(), msg);
                 }
                 exit(1);
             }
@@ -211,7 +259,7 @@ fn main() {
                 if flags.json {
                     println!(r#"{{"success":false,"error":"{}"}}"#, msg);
                 } else {
-                    eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                    eprintln!("{} {}", color::error_indicator(), msg);
                 }
                 exit(1);
             }
@@ -233,23 +281,30 @@ fn main() {
             if flags.json {
                 println!(r#"{{"success":false,"error":"{}"}}"#, msg);
             } else {
-                eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+                eprintln!("{} {}", color::error_indicator(), msg);
             }
             exit(1);
         }
     }
 
-    // Launch headed browser if --headed flag is set (without CDP)
-    if flags.headed && flags.cdp.is_none() {
-        let launch_cmd = json!({
+    // Launch headed browser or proxy if flags are set (without CDP)
+    if (flags.headed || flags.proxy.is_some()) && flags.cdp.is_none() {
+        let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
-            "headless": false
+            "headless": !flags.headed
         });
+
+        if let Some(ref proxy_str) = flags.proxy {
+            let proxy_obj = parse_proxy(proxy_str);
+            launch_cmd.as_object_mut()
+                .expect("json! macro guarantees object type")
+                .insert("proxy".to_string(), proxy_obj);
+        }
 
         if let Err(e) = send_command(launch_cmd, &flags.session) {
             if !flags.json {
-                eprintln!("\x1b[33m⚠\x1b[0m Could not launch headed browser: {}", e);
+                eprintln!("{} Could not configure browser: {}", color::warning_indicator(), e);
             }
         }
     }
@@ -266,9 +321,68 @@ fn main() {
             if flags.json {
                 println!(r#"{{"success":false,"error":"{}"}}"#, e);
             } else {
-                eprintln!("\x1b[31m✗\x1b[0m {}", e);
+                eprintln!("{} {}", color::error_indicator(), e);
             }
             exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_proxy_simple() {
+        let result = parse_proxy("http://proxy.com:8080");
+        assert_eq!(result["server"], "http://proxy.com:8080");
+        assert!(result.get("username").is_none());
+        assert!(result.get("password").is_none());
+    }
+
+    #[test]
+    fn test_parse_proxy_with_auth() {
+        let result = parse_proxy("http://user:pass@proxy.com:8080");
+        assert_eq!(result["server"], "http://proxy.com:8080");
+        assert_eq!(result["username"], "user");
+        assert_eq!(result["password"], "pass");
+    }
+
+    #[test]
+    fn test_parse_proxy_username_only() {
+        let result = parse_proxy("http://user@proxy.com:8080");
+        assert_eq!(result["server"], "http://proxy.com:8080");
+        assert_eq!(result["username"], "user");
+        assert_eq!(result["password"], "");
+    }
+
+    #[test]
+    fn test_parse_proxy_no_protocol() {
+        let result = parse_proxy("proxy.com:8080");
+        assert_eq!(result["server"], "proxy.com:8080");
+        assert!(result.get("username").is_none());
+    }
+
+    #[test]
+    fn test_parse_proxy_socks5() {
+        let result = parse_proxy("socks5://proxy.com:1080");
+        assert_eq!(result["server"], "socks5://proxy.com:1080");
+        assert!(result.get("username").is_none());
+    }
+
+    #[test]
+    fn test_parse_proxy_socks5_with_auth() {
+        let result = parse_proxy("socks5://admin:secret@proxy.com:1080");
+        assert_eq!(result["server"], "socks5://proxy.com:1080");
+        assert_eq!(result["username"], "admin");
+        assert_eq!(result["password"], "secret");
+    }
+
+    #[test]
+    fn test_parse_proxy_complex_password() {
+        let result = parse_proxy("http://user:p@ss:w0rd@proxy.com:8080");
+        assert_eq!(result["server"], "http://proxy.com:8080");
+        assert_eq!(result["username"], "user");
+        assert_eq!(result["password"], "p@ss:w0rd");
     }
 }

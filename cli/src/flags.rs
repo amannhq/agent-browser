@@ -11,7 +11,8 @@ pub struct Flags {
     pub headers: Option<String>,
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
-    /// Session persistence name (for auto-save/load of cookies and storage)
+    pub extensions: Vec<String>,
+    pub proxy: Option<String>,
     pub session_name: Option<String>,
 }
 
@@ -23,6 +24,12 @@ pub struct ParsedFlags {
 
 pub fn parse_flags(args: &[String]) -> ParsedFlags {
     let mut errors: Vec<String> = Vec::new();
+    
+    // Parse extensions from environment variable
+    let extensions_env = env::var("AGENT_BROWSER_EXTENSIONS")
+        .ok()
+        .map(|s| s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect::<Vec<_>>())
+        .unwrap_or_default();
     
     // Validate session_name from environment if present
     let env_session_name = env::var("AGENT_BROWSER_SESSION_NAME").ok();
@@ -49,6 +56,8 @@ pub fn parse_flags(args: &[String]) -> ParsedFlags {
         headers: None,
         executable_path: env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok(),
         cdp: None,
+        extensions: extensions_env,
+        proxy: None,
         session_name: validated_env_session_name,
     };
 
@@ -76,10 +85,22 @@ pub fn parse_flags(args: &[String]) -> ParsedFlags {
                     flags.executable_path = Some(s.clone());
                     i += 1;
                 }
-            }
+            },
+            "--extension" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.extensions.push(s.clone());
+                    i += 1;
+                }
+            },
             "--cdp" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.cdp = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--proxy" => {
+                if let Some(p) = args.get(i + 1) {
+                    flags.proxy = Some(p.clone());
                     i += 1;
                 }
             }
@@ -110,7 +131,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     // Global flags that should be stripped from command args
     const GLOBAL_FLAGS: &[&str] = &["--json", "--full", "--headed", "--debug"];
     // Global flags that take a value (need to skip the next arg too)
-    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--cdp", "--session-name"];
+    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &["--session", "--headers", "--executable-path", "--cdp", "--extension", "--proxy", "--session-name"];
 
     for arg in args.iter() {
         if skip_next {
