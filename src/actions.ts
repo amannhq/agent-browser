@@ -1,12 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import type { Page, Frame } from 'playwright-core';
 import type { BrowserManager, ScreencastFrame } from './browser.js';
 import {
   getSessionsDir,
   readStateFile,
-  writeStateFile,
   isValidSessionName,
   isEncryptedPayload,
 } from './state-utils.js';
