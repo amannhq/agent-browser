@@ -515,17 +515,16 @@ async function handleClick(command: ClickCommand, browser: BrowserManager): Prom
   try {
     // If --new-tab flag is set, get the href and open in a new tab
     if (command.newTab) {
-      const href = await locator.getAttribute('href');
-      if (!href) {
+      // Resolve URL within page context to respect <base> tags
+      const fullUrl = await locator.evaluate((el: Element) => {
+        const href = el.getAttribute('href');
+        return href ? new URL(href, document.baseURI).toString() : '';
+      });
+      if (!fullUrl) {
         throw new Error(
           `Element '${command.selector}' does not have an href attribute. --new-tab only works on links.`
         );
       }
-
-      // Resolve relative URLs
-      const currentPage = browser.getPage();
-      const baseUrl = currentPage.url();
-      const fullUrl = new URL(href, baseUrl).toString();
 
       // Create new tab using the BrowserManager's method
       await browser.newTab();

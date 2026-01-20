@@ -106,11 +106,13 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
 
         // === Core Actions ===
         "click" => {
-            let sel = rest.get(0).ok_or_else(|| ParseError::MissingArguments {
-                context: "click".to_string(),
-                usage: "click <selector> [--new-tab]",
-            })?;
             let new_tab = rest.iter().any(|arg| *arg == "--new-tab");
+            let sel = rest.iter()
+                .find(|arg| **arg != "--new-tab")
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "click".to_string(),
+                    usage: "click <selector> [--new-tab]",
+                })?;
             if new_tab {
                 Ok(json!({ "id": id, "action": "click", "selector": sel, "newTab": true }))
             } else {
@@ -1392,6 +1394,31 @@ mod tests {
         assert_eq!(cmd["action"], "click");
         assert_eq!(cmd["selector"], "@e1");
         assert_eq!(cmd["newTab"], true);
+    }
+
+    #[test]
+    fn test_click_new_tab_flag_before_selector() {
+        let cmd = parse_command(&args("click --new-tab #button"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "click");
+        assert_eq!(cmd["selector"], "#button");
+        assert_eq!(cmd["newTab"], true);
+    }
+
+    #[test]
+    fn test_click_new_tab_only_should_error() {
+        let result = parse_command(&args("click --new-tab"), &default_flags());
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let error_msg = e.format();
+            assert!(error_msg.contains("Missing arguments"));
+            assert!(error_msg.contains("click <selector> [--new-tab]"));
+        }
+    }
+
+    #[test]
+    fn test_click_missing_selector_should_error() {
+        let result = parse_command(&args("click"), &default_flags());
+        assert!(result.is_err());
     }
 
     #[test]
