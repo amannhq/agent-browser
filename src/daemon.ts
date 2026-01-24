@@ -14,6 +14,10 @@ import {
   isEncryptedPayload,
   decryptData,
   ENCRYPTION_KEY_ENV,
+  getAutoStateFilePath,
+  isValidSessionName,
+  cleanupExpiredStates,
+  writeStateFile,
 } from './state-utils.js';
 
 // Platform detection
@@ -55,93 +59,22 @@ async function saveStateToFile(
   return { encrypted: false };
 }
 
-/**
- * Load state from file with automatic decryption.
- */
-function loadStateFromFile(filepath: string): object {
-  const content = fs.readFileSync(filepath, 'utf-8');
-  const parsed = JSON.parse(content);
-
-  if (isEncryptedPayload(parsed)) {
-    const key = getEncryptionKey();
-    if (!key) {
-      throw new Error(
-        `State file is encrypted but ${ENCRYPTION_KEY_ENV} is not set. ` +
-          `Set the environment variable to decrypt.`
-      );
-    }
-    const decrypted = decryptData(parsed, key);
-    return JSON.parse(decrypted);
-  }
-
-  return parsed;
-}
-
-/**
- * Get the auto-save state file path for current session
- * Pattern: {SESSION_NAME}-{SESSION_ID}.json
- */
-function getAutoStateFilePath(sessionName: string, sessionId: string): string | null {
-  if (!sessionName) return null;
-  const sessionsDir = ensureSessionsDir();
-  return path.join(sessionsDir, `${sessionName}-${sessionId}.json`);
-}
-
-/**
- * Check if auto-state file exists
- */
-function autoStateFileExists(sessionName: string, sessionId: string): boolean {
-  const filePath = getAutoStateFilePath(sessionName, sessionId);
-  return filePath ? fs.existsSync(filePath) : false;
-}
-
-// Auto-expiration configuration
 const AUTO_EXPIRE_ENV = 'AGENT_BROWSER_STATE_EXPIRE_DAYS';
 const DEFAULT_EXPIRE_DAYS = 30;
 
-/**
- * Clean up expired state files (files older than N days).
- * Called on daemon startup.
- */
-function cleanupExpiredStates(): void {
+function runCleanupExpiredStates(): void {
   const expireDaysStr = process.env[AUTO_EXPIRE_ENV];
   const expireDays = expireDaysStr ? parseInt(expireDaysStr, 10) : DEFAULT_EXPIRE_DAYS;
 
-  // Skip if set to 0 or negative (disabled)
   if (isNaN(expireDays) || expireDays <= 0) {
     return;
   }
 
-  const sessionsDir = getSessionsDir();
-  if (!fs.existsSync(sessionsDir)) {
-    return;
-  }
-
-  const now = Date.now();
-  const maxAge = expireDays * 24 * 60 * 60 * 1000;
-  let deletedCount = 0;
-
   try {
-    const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
-
-    for (const file of files) {
-      const filepath = path.join(sessionsDir, file);
-      try {
-        const stats = fs.statSync(filepath);
-        const age = now - stats.mtime.getTime();
-
-        if (age > maxAge) {
-          fs.unlinkSync(filepath);
-          deletedCount++;
-        }
-      } catch {
-        // Ignore individual file errors
-      }
-    }
-
-    if (deletedCount > 0 && process.env.AGENT_BROWSER_DEBUG === '1') {
+    const deleted = cleanupExpiredStates(expireDays);
+    if (deleted.length > 0 && process.env.AGENT_BROWSER_DEBUG === '1') {
       console.error(
-        `[DEBUG] Auto-expired ${deletedCount} state file(s) older than ${expireDays} days`
+        `[DEBUG] Auto-expired ${deleted.length} state file(s) older than ${expireDays} days`
       );
     }
   } catch (err) {
@@ -180,6 +113,31 @@ function getPortForSession(session: string): number {
 }
 
 /**
+ * Get the base directory for socket/pid files.
+ * Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser > tmpdir
+ */
+export function getSocketDir(): string {
+  // 1. Explicit override
+  if (process.env.AGENT_BROWSER_SOCKET_DIR) {
+    return process.env.AGENT_BROWSER_SOCKET_DIR;
+  }
+
+  // 2. XDG_RUNTIME_DIR (Linux standard)
+  if (process.env.XDG_RUNTIME_DIR) {
+    return path.join(process.env.XDG_RUNTIME_DIR, 'agent-browser');
+  }
+
+  // 3. Home directory fallback (like Docker Desktop's ~/.docker/run/)
+  const homeDir = os.homedir();
+  if (homeDir) {
+    return path.join(homeDir, '.agent-browser');
+  }
+
+  // 4. Last resort: temp dir
+  return path.join(os.tmpdir(), 'agent-browser');
+}
+
+/**
  * Get the socket path for the current session (Unix) or port (Windows)
  */
 export function getSocketPath(session?: string): string {
@@ -187,7 +145,7 @@ export function getSocketPath(session?: string): string {
   if (isWindows) {
     return String(getPortForSession(sess));
   }
-  return path.join(os.tmpdir(), `agent-browser-${sess}.sock`);
+  return path.join(getSocketDir(), `${sess}.sock`);
 }
 
 /**
@@ -195,7 +153,7 @@ export function getSocketPath(session?: string): string {
  */
 export function getPortFile(session?: string): string {
   const sess = session ?? currentSession;
-  return path.join(os.tmpdir(), `agent-browser-${sess}.port`);
+  return path.join(getSocketDir(), `${sess}.port`);
 }
 
 /**
@@ -203,7 +161,7 @@ export function getPortFile(session?: string): string {
  */
 export function getPidFile(session?: string): string {
   const sess = session ?? currentSession;
-  return path.join(os.tmpdir(), `agent-browser-${sess}.pid`);
+  return path.join(getSocketDir(), `${sess}.pid`);
 }
 
 /**
@@ -236,7 +194,7 @@ export function getConnectionInfo(
   if (isWindows) {
     return { type: 'tcp', port: getPortForSession(sess) };
   }
-  return { type: 'unix', path: path.join(os.tmpdir(), `agent-browser-${sess}.sock`) };
+  return { type: 'unix', path: path.join(getSocketDir(), `${sess}.sock`) };
 }
 
 /**
@@ -265,7 +223,7 @@ export function cleanupSocket(session?: string): void {
  */
 export function getStreamPortFile(session?: string): string {
   const sess = session ?? currentSession;
-  return path.join(os.tmpdir(), `agent-browser-${sess}.stream`);
+  return path.join(getSocketDir(), `${sess}.stream`);
 }
 
 /**
@@ -273,11 +231,17 @@ export function getStreamPortFile(session?: string): string {
  * @param options.streamPort Port for WebSocket stream server (0 to disable)
  */
 export async function startDaemon(options?: { streamPort?: number }): Promise<void> {
+  // Ensure socket directory exists with restricted permissions (owner-only access)
+  const socketDir = getSocketDir();
+  if (!fs.existsSync(socketDir)) {
+    fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 });
+  }
+
   // Clean up any stale socket
   cleanupSocket();
 
   // Clean up expired state files on startup
-  cleanupExpiredStates();
+  runCleanupExpiredStates();
 
   const browser = new BrowserManager();
   let shuttingDown = false;
@@ -333,19 +297,54 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
                   .map((p) => p.trim())
                   .filter(Boolean)
               : undefined;
-            // Check for auto-load state
-            const sessionName = process.env.AGENT_BROWSER_SESSION_NAME;
-            const sessionId = process.env.AGENT_BROWSER_SESSION || 'default';
-            const autoStatePath = sessionName
-              ? getAutoStateFilePath(sessionName, sessionId)
+
+            // Parse args from env (comma or newline separated)
+            const argsEnv = process.env.AGENT_BROWSER_ARGS;
+            const args = argsEnv
+              ? argsEnv
+                  .split(/[,\n]/)
+                  .map((a) => a.trim())
+                  .filter((a) => a.length > 0)
               : undefined;
+
+            // Parse proxy from env
+            const proxyServer = process.env.AGENT_BROWSER_PROXY;
+            const proxyBypass = process.env.AGENT_BROWSER_PROXY_BYPASS;
+            const proxy = proxyServer
+              ? {
+                  server: proxyServer,
+                  ...(proxyBypass && { bypass: proxyBypass }),
+                }
+              : undefined;
+
+            // Check for auto-load state
+            // SECURITY: Validate session name to prevent path traversal attacks
+            const sessionNameRaw = process.env.AGENT_BROWSER_SESSION_NAME;
+            const sessionName =
+              sessionNameRaw && isValidSessionName(sessionNameRaw) ? sessionNameRaw : undefined;
+            if (sessionNameRaw && !sessionName && process.env.AGENT_BROWSER_DEBUG === '1') {
+              console.error(`[SECURITY] Invalid session name rejected: ${sessionNameRaw}`);
+            }
+            const sessionId = process.env.AGENT_BROWSER_SESSION || 'default';
+            let autoStatePath: string | undefined;
+            try {
+              autoStatePath = sessionName
+                ? (getAutoStateFilePath(sessionName, sessionId) ?? undefined)
+                : undefined;
+            } catch {
+              // Validation already done above, this is a safety net
+              autoStatePath = undefined;
+            }
 
             await browser.launch({
               id: 'auto',
-              action: 'launch',
+              action: 'launch' as const,
               headless: process.env.AGENT_BROWSER_HEADED !== '1',
               executablePath: process.env.AGENT_BROWSER_EXECUTABLE_PATH,
               extensions: extensions,
+              args,
+              userAgent: process.env.AGENT_BROWSER_USER_AGENT,
+              proxy,
               autoStateFilePath:
                 autoStatePath && fs.existsSync(autoStatePath) ? autoStatePath : undefined,
             });
@@ -353,13 +352,20 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
 
           // Handle explicit launch with auto-load state
           if (parseResult.command.action === 'launch') {
-            const sessionName = process.env.AGENT_BROWSER_SESSION_NAME;
+            // SECURITY: Validate session name to prevent path traversal attacks
+            const sessionNameRaw = process.env.AGENT_BROWSER_SESSION_NAME;
+            const sessionName =
+              sessionNameRaw && isValidSessionName(sessionNameRaw) ? sessionNameRaw : undefined;
             const sessionId = process.env.AGENT_BROWSER_SESSION || 'default';
 
             if (sessionName && !parseResult.command.autoStateFilePath) {
-              const autoStatePath = getAutoStateFilePath(sessionName, sessionId);
-              if (autoStatePath && fs.existsSync(autoStatePath)) {
-                parseResult.command.autoStateFilePath = autoStatePath;
+              try {
+                const autoStatePath = getAutoStateFilePath(sessionName, sessionId);
+                if (autoStatePath && fs.existsSync(autoStatePath)) {
+                  parseResult.command.autoStateFilePath = autoStatePath;
+                }
+              } catch {
+                // Invalid session name, ignore
               }
             }
           }
@@ -367,27 +373,34 @@ export async function startDaemon(options?: { streamPort?: number }): Promise<vo
           // Handle close command specially
           if (parseResult.command.action === 'close') {
             // Auto-save state before closing
-            const sessionName = process.env.AGENT_BROWSER_SESSION_NAME;
+            // SECURITY: Validate session name to prevent path traversal attacks
+            const sessionNameRaw = process.env.AGENT_BROWSER_SESSION_NAME;
+            const sessionName =
+              sessionNameRaw && isValidSessionName(sessionNameRaw) ? sessionNameRaw : undefined;
             const sessionId = process.env.AGENT_BROWSER_SESSION || 'default';
 
             if (sessionName && browser.isLaunched()) {
-              const autoStatePath = getAutoStateFilePath(sessionName, sessionId);
-              if (autoStatePath) {
-                try {
-                  const { encrypted } = await saveStateToFile(browser, autoStatePath);
-                  // Set file permissions to owner read/write only (0o600)
-                  fs.chmodSync(autoStatePath, 0o600);
-                  if (process.env.AGENT_BROWSER_DEBUG === '1') {
-                    console.error(
-                      `Auto-saved session state: ${autoStatePath}${encrypted ? ' (encrypted)' : ''}`
-                    );
-                  }
-                } catch (err) {
-                  // Non-blocking: don't fail close if save fails
-                  if (process.env.AGENT_BROWSER_DEBUG === '1') {
-                    console.error(`Failed to auto-save session state:`, err);
+              try {
+                const autoStatePath = getAutoStateFilePath(sessionName, sessionId);
+                if (autoStatePath) {
+                  try {
+                    const { encrypted } = await saveStateToFile(browser, autoStatePath);
+                    // Set file permissions to owner read/write only (0o600)
+                    fs.chmodSync(autoStatePath, 0o600);
+                    if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                      console.error(
+                        `Auto-saved session state: ${autoStatePath}${encrypted ? ' (encrypted)' : ''}`
+                      );
+                    }
+                  } catch (err) {
+                    // Non-blocking: don't fail close if save fails
+                    if (process.env.AGENT_BROWSER_DEBUG === '1') {
+                      console.error(`Failed to auto-save session state:`, err);
+                    }
                   }
                 }
+              } catch {
+                // Invalid session name, ignore
               }
             }
 

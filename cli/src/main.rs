@@ -20,7 +20,7 @@ use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
 use commands::{gen_id, parse_command, ParseError};
-use connection::{ensure_daemon, send_command};
+use connection::{ensure_daemon, get_socket_dir, send_command};
 use flags::{clean_args, parse_flags};
 use install::run_install;
 use output::{print_command_help, print_help, print_response, print_version};
@@ -60,28 +60,26 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
 
     match subcommand {
         Some("list") => {
-            let tmp = env::temp_dir();
+            let socket_dir = get_socket_dir();
             let mut sessions: Vec<String> = Vec::new();
 
-            if let Ok(entries) = fs::read_dir(&tmp) {
+            if let Ok(entries) = fs::read_dir(&socket_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    // Look for socket files (Unix) or pid files
-                    if name.starts_with("agent-browser-") && name.ends_with(".pid") {
-                        let session_name = name
-                            .strip_prefix("agent-browser-")
-                            .and_then(|s| s.strip_suffix(".pid"))
-                            .unwrap_or("");
+                    // Look for pid files in socket directory
+                    if name.ends_with(".pid") {
+                        let session_name = name.strip_suffix(".pid").unwrap_or("");
                         if !session_name.is_empty() {
                             // Check if session is actually running
-                            let pid_path = tmp.join(&name);
+                            let pid_path = socket_dir.join(&name);
                             if let Ok(pid_str) = fs::read_to_string(&pid_path) {
                                 if let Ok(pid) = pid_str.trim().parse::<u32>() {
                                     #[cfg(unix)]
                                     let running = unsafe { libc::kill(pid as i32, 0) == 0 };
                                     #[cfg(windows)]
                                     let running = unsafe {
-                                        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                                        let handle =
+                                            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
                                         if handle != 0 {
                                             CloseHandle(handle);
                                             true
@@ -133,22 +131,8 @@ fn main() {
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
-    let parsed = parse_flags(&args);
-    let flags = parsed.flags;
+    let flags = parse_flags(&args);
     let clean = clean_args(&args);
-
-    // Report any validation errors and exit
-    if !parsed.errors.is_empty() {
-        for error in &parsed.errors {
-            eprintln!("\x1b[31m✗\x1b[0m {}", error);
-        }
-        exit(1);
-    }
-
-    // Export session_name to environment for daemon to pick up
-    if let Some(ref name) = flags.session_name {
-        env::set_var("AGENT_BROWSER_SESSION_NAME", name);
-    }
 
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
     let has_version = args.iter().any(|a| a == "--version" || a == "-V");
@@ -194,6 +178,7 @@ fn main() {
                     ParseError::UnknownCommand { .. } => "unknown_command",
                     ParseError::UnknownSubcommand { .. } => "unknown_subcommand",
                     ParseError::MissingArguments { .. } => "missing_arguments",
+                    ParseError::InvalidValue { .. } => "invalid_value",
                     ParseError::InvalidSessionName { .. } => "invalid_session_name",
                 };
                 println!(
@@ -208,7 +193,17 @@ fn main() {
         }
     };
 
-    let daemon_result = match ensure_daemon(&flags.session, flags.headed, flags.executable_path.as_deref(), flags.session_name.as_deref(), &flags.extensions) {
+    let daemon_result = match ensure_daemon(
+        &flags.session,
+        flags.headed,
+        flags.executable_path.as_deref(),
+        &flags.extensions,
+        flags.args.as_deref(),
+        flags.user_agent.as_deref(),
+        flags.proxy.as_deref(),
+        flags.proxy_bypass.as_deref(),
+        flags.session_name.as_deref(),
+    ) {
         Ok(result) => result,
         Err(e) => {
             if flags.json {
@@ -220,60 +215,117 @@ fn main() {
         }
     };
 
-    // Warn if executable_path was specified but daemon was already running
-    if daemon_result.already_running && (flags.executable_path.is_some() || !flags.extensions.is_empty()) {
-        if !flags.json {
-            if flags.executable_path.is_some() {
-                eprintln!("{} --executable-path ignored: daemon already running. Use 'agent-browser close' first to restart with new path.", color::warning_indicator());
-            }
-            if !flags.extensions.is_empty() {
-                eprintln!("{} --extension ignored: daemon already running. Use 'agent-browser close' first to restart with extensions.", color::warning_indicator());
-            }
+    // Warn if launch-time options were specified but daemon was already running
+    if daemon_result.already_running {
+        let has_extensions = !flags.extensions.is_empty();
+        let ignored_flags: Vec<&str> = [
+            flags.executable_path.as_ref().map(|_| "--executable-path"),
+            if has_extensions { Some("--extension") } else { None },
+            flags.profile.as_ref().map(|_| "--profile"),
+            flags.args.as_ref().map(|_| "--args"),
+            flags.user_agent.as_ref().map(|_| "--user-agent"),
+            flags.proxy.as_ref().map(|_| "--proxy"),
+            flags.proxy_bypass.as_ref().map(|_| "--proxy-bypass"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        if !ignored_flags.is_empty() && !flags.json {
+            eprintln!(
+                "{} {} ignored: daemon already running. Use 'agent-browser close' first to restart with new options.",
+                color::warning_indicator(),
+                ignored_flags.join(", ")
+            );
         }
     }
 
-    // Connect via CDP if --cdp flag is set
-    if let Some(ref port) = flags.cdp {
-        let cdp_port: u16 = match port.parse::<u32>() {
-            Ok(p) if p == 0 => {
-                let msg = "Invalid CDP port: port must be greater than 0".to_string();
-                if flags.json {
-                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), msg);
-                }
-                exit(1);
-            }
-            Ok(p) if p > 65535 => {
-                let msg = format!("Invalid CDP port: {} is out of range (valid range: 1-65535)", p);
-                if flags.json {
-                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), msg);
-                }
-                exit(1);
-            }
-            Ok(p) => p as u16,
-            Err(_) => {
-                let msg = format!("Invalid CDP port: '{}' is not a valid number. Port must be a number between 1 and 65535", port);
-                if flags.json {
-                    println!(r#"{{"success":false,"error":"{}"}}"#, msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), msg);
-                }
-                exit(1);
-            }
-        };
+    // Validate mutually exclusive options
+    if flags.cdp.is_some() && flags.provider.is_some() {
+        let msg = "Cannot use --cdp and -p/--provider together";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+        }
+        exit(1);
+    }
 
-        let launch_cmd = json!({
-            "id": gen_id(),
-            "action": "launch",
-            "cdpPort": cdp_port
-        });
+    if flags.provider.is_some() && !flags.extensions.is_empty() {
+        let msg = "Cannot use --extension with -p/--provider (extensions require local browser)";
+        if flags.json {
+            println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+        } else {
+            eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+        }
+        exit(1);
+    }
+
+    // Connect via CDP if --cdp flag is set
+    // Accepts either a port number (e.g., "9222") or a full URL (e.g., "ws://..." or "wss://...")
+    if let Some(ref cdp_value) = flags.cdp {
+        let launch_cmd = if cdp_value.starts_with("ws://")
+            || cdp_value.starts_with("wss://")
+            || cdp_value.starts_with("http://")
+            || cdp_value.starts_with("https://")
+        {
+            // It's a URL - use cdpUrl field
+            json!({
+                "id": gen_id(),
+                "action": "launch",
+                "cdpUrl": cdp_value
+            })
+        } else {
+            // It's a port number - validate and use cdpPort field
+            let cdp_port: u16 = match cdp_value.parse::<u32>() {
+                Ok(p) if p == 0 => {
+                    let msg = "Invalid CDP port: port must be greater than 0".to_string();
+                    if flags.json {
+                        println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), msg);
+                    }
+                    exit(1);
+                }
+                Ok(p) if p > 65535 => {
+                    let msg = format!(
+                        "Invalid CDP port: {} is out of range (valid range: 1-65535)",
+                        p
+                    );
+                    if flags.json {
+                        println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), msg);
+                    }
+                    exit(1);
+                }
+                Ok(p) => p as u16,
+                Err(_) => {
+                    let msg = format!(
+                        "Invalid CDP value: '{}' is not a valid port number or URL",
+                        cdp_value
+                    );
+                    if flags.json {
+                        println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), msg);
+                    }
+                    exit(1);
+                }
+            };
+            json!({
+                "id": gen_id(),
+                "action": "launch",
+                "cdpPort": cdp_port
+            })
+        };
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
-            Ok(resp) => Some(resp.error.unwrap_or_else(|| "CDP connection failed".to_string())),
+            Ok(resp) => Some(
+                resp.error
+                    .unwrap_or_else(|| "CDP connection failed".to_string()),
+            ),
             Err(e) => Some(e.to_string()),
         };
 
@@ -287,19 +339,69 @@ fn main() {
         }
     }
 
-    // Launch headed browser or proxy if flags are set (without CDP)
-    if (flags.headed || flags.proxy.is_some()) && flags.cdp.is_none() {
+    // Launch with cloud provider if -p flag is set
+    if let Some(ref provider) = flags.provider {
+        let launch_cmd = json!({
+            "id": gen_id(),
+            "action": "launch",
+            "provider": provider
+        });
+
+        let err = match send_command(launch_cmd, &flags.session) {
+            Ok(resp) if resp.success => None,
+            Ok(resp) => Some(resp.error.unwrap_or_else(|| "Provider connection failed".to_string())),
+            Err(e) => Some(e.to_string()),
+        };
+
+        if let Some(msg) = err {
+            if flags.json {
+                println!(r#"{{"success":false,"error":"{}"}}"#, msg);
+            } else {
+                eprintln!("\x1b[31m✗\x1b[0m {}", msg);
+            }
+            exit(1);
+        }
+    }
+
+    // Launch headed browser or configure browser options (without CDP or provider)
+    if (flags.headed || flags.profile.is_some() || flags.proxy.is_some() || flags.args.is_some() || flags.user_agent.is_some()) && flags.cdp.is_none() && flags.provider.is_none() {
         let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
             "headless": !flags.headed
         });
 
+        let cmd_obj = launch_cmd.as_object_mut()
+            .expect("json! macro guarantees object type");
+
+        // Add profile path if specified
+        if let Some(ref profile_path) = flags.profile {
+            cmd_obj.insert("profile".to_string(), json!(profile_path));
+        }
+
         if let Some(ref proxy_str) = flags.proxy {
-            let proxy_obj = parse_proxy(proxy_str);
-            launch_cmd.as_object_mut()
-                .expect("json! macro guarantees object type")
-                .insert("proxy".to_string(), proxy_obj);
+            let mut proxy_obj = parse_proxy(proxy_str);
+            // Add bypass if specified
+            if let Some(ref bypass) = flags.proxy_bypass {
+                if let Some(obj) = proxy_obj.as_object_mut() {
+                    obj.insert("bypass".to_string(), json!(bypass));
+                }
+            }
+            cmd_obj.insert("proxy".to_string(), proxy_obj);
+        }
+
+        if let Some(ref ua) = flags.user_agent {
+            cmd_obj.insert("userAgent".to_string(), json!(ua));
+        }
+
+        if let Some(ref a) = flags.args {
+            // Parse args (comma or newline separated)
+            let args_vec: Vec<String> = a
+                .split(&[',', '\n'][..])
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            cmd_obj.insert("args".to_string(), json!(args_vec));
         }
 
         if let Err(e) = send_command(launch_cmd, &flags.session) {
@@ -309,10 +411,14 @@ fn main() {
         }
     }
 
-    match send_command(cmd, &flags.session) {
+    match send_command(cmd.clone(), &flags.session) {
         Ok(resp) => {
             let success = resp.success;
-            print_response(&resp, flags.json);
+            // Extract action for context-specific output handling
+            let action = cmd
+                .get("action")
+                .and_then(|v| v.as_str());
+            print_response(&resp, flags.json, action);
             if !success {
                 exit(1);
             }

@@ -58,7 +58,12 @@ agent-browser wait <ms>               # Wait for time
 agent-browser wait --text "Welcome"   # Wait for text
 agent-browser wait --url "**/dash"    # Wait for URL pattern
 agent-browser wait --load networkidle # Wait for load state
-agent-browser wait --fn "condition"   # Wait for JS condition`} />
+agent-browser wait --fn "condition"   # Wait for JS condition
+agent-browser wait --download [path]  # Wait for download`} />
+
+        <h2>Downloads</h2>
+        <CodeBlock code={`agent-browser download <sel> <path>   # Click element to trigger download
+agent-browser wait --download [path]  # Wait for any download to complete`} />
 
         <h2>Mouse</h2>
         <CodeBlock code={`agent-browser mouse move <x> <y>      # Move mouse

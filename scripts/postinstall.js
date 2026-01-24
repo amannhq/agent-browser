@@ -2,7 +2,7 @@
 
 /**
  * Postinstall script for agent-browser
- * 
+ *
  * Downloads the platform-specific native binary if not present.
  */
 
@@ -30,13 +30,13 @@ const packageJson = JSON.parse(
 const version = packageJson.version;
 
 // GitHub release URL
-const GITHUB_REPO = 'anthropics/agent-browser'; // Update this to your actual repo
+const GITHUB_REPO = 'vercel-labs/agent-browser';
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
 
 async function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
     const file = createWriteStream(dest);
-    
+
     const request = (url) => {
       get(url, (response) => {
         // Handle redirects
@@ -44,12 +44,12 @@ async function downloadFile(url, dest) {
           request(response.headers.location);
           return;
         }
-        
+
         if (response.statusCode !== 200) {
           reject(new Error(`Failed to download: HTTP ${response.statusCode}`));
           return;
         }
-        
+
         response.pipe(file);
         file.on('finish', () => {
           file.close();
@@ -60,7 +60,7 @@ async function downloadFile(url, dest) {
         reject(err);
       });
     };
-    
+
     request(url);
   });
 }
@@ -68,7 +68,15 @@ async function downloadFile(url, dest) {
 async function main() {
   // Check if binary already exists
   if (existsSync(binaryPath)) {
-    console.log(`✓ Native binary already exists: ${binaryName}`);
+    // Ensure binary is executable (npm doesn't preserve execute bit)
+    if (platform() !== 'win32') {
+      try {
+        chmodSync(binaryPath, 0o755);
+      } catch (err) {
+        console.warn(`Warning: Could not set executable permission: ${err.message}`);
+      }
+    }
+    console.log(`Native binary ready: ${binaryName}`);
     return;
   }
 
@@ -82,13 +90,17 @@ async function main() {
 
   try {
     await downloadFile(DOWNLOAD_URL, binaryPath);
-    
+
     // Make executable on Unix
     if (platform() !== 'win32') {
-      chmodSync(binaryPath, 0o755);
+      try {
+        chmodSync(binaryPath, 0o755);
+      } catch (chmodErr) {
+        console.warn(`Warning: Could not set executable permission: ${chmodErr.message}`);
+      }
     }
-    
-    console.log(`✓ Downloaded native binary: ${binaryName}`);
+
+    console.log(`Downloaded native binary: ${binaryName}`);
   } catch (err) {
     console.log(`⚠ Could not download native binary: ${err.message}`);
     console.log(`  The CLI will use Node.js fallback (slightly slower startup)`);
