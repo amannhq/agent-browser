@@ -7,6 +7,8 @@ import {
   readStateFile,
   isValidSessionName,
   isEncryptedPayload,
+  listStateFiles,
+  cleanupExpiredStates,
 } from './state-utils.js';
 import type {
   Command,
@@ -1467,20 +1469,17 @@ async function handleStateLoad(
 
 async function handleStateList(command: StateListCommand): Promise<Response> {
   const sessionsDir = getSessionsDir();
+  const files = listStateFiles();
 
-  // Ensure directory exists
-  if (!fs.existsSync(sessionsDir)) {
+  if (files.length === 0) {
     return successResponse(command.id, { files: [] });
   }
 
-  const files = fs.readdirSync(sessionsDir);
   const stateFiles = files
-    .filter((f) => f.endsWith('.json'))
     .map((filename) => {
       const filepath = path.join(sessionsDir, filename);
       const stats = fs.statSync(filepath);
 
-      // Check if file is encrypted
       let encrypted = false;
       try {
         const content = fs.readFileSync(filepath, 'utf-8');
@@ -1506,7 +1505,6 @@ async function handleStateList(command: StateListCommand): Promise<Response> {
 async function handleStateClear(command: StateClearCommand): Promise<Response> {
   const sessionsDir = getSessionsDir();
 
-  // Validate session name if provided to prevent path traversal
   if (command.sessionName && !isValidSessionName(command.sessionName)) {
     return errorResponse(
       command.id,
@@ -1514,25 +1512,21 @@ async function handleStateClear(command: StateClearCommand): Promise<Response> {
     );
   }
 
-  // Ensure directory exists
-  if (!fs.existsSync(sessionsDir)) {
+  const files = listStateFiles();
+  if (files.length === 0) {
     return successResponse(command.id, { deleted: [] });
   }
 
   const deleted: string[] = [];
 
   if (command.all) {
-    // Delete all state files
-    const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
     for (const file of files) {
       fs.unlinkSync(path.join(sessionsDir, file));
       deleted.push(file);
     }
   } else if (command.sessionName) {
-    // Delete files matching the session name pattern
-    const files = fs.readdirSync(sessionsDir);
     for (const file of files) {
-      if (file.startsWith(`${command.sessionName}-`) && file.endsWith('.json')) {
+      if (file.startsWith(`${command.sessionName}-`)) {
         fs.unlinkSync(path.join(sessionsDir, file));
         deleted.push(file);
       }
@@ -1594,32 +1588,8 @@ async function handleStateShow(command: StateShowCommand): Promise<Response> {
 }
 
 async function handleStateClean(command: StateCleanCommand): Promise<Response> {
-  const sessionsDir = getSessionsDir();
-
-  // Ensure directory exists
-  if (!fs.existsSync(sessionsDir)) {
-    return successResponse(command.id, { deleted: [], keptCount: 0 });
-  }
-
-  const now = Date.now();
-  const maxAge = command.days * 24 * 60 * 60 * 1000; // Convert days to milliseconds
-  const deleted: string[] = [];
-  let keptCount = 0;
-
-  const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith('.json'));
-
-  for (const file of files) {
-    const filepath = path.join(sessionsDir, file);
-    const stats = fs.statSync(filepath);
-    const age = now - stats.mtime.getTime();
-
-    if (age > maxAge) {
-      fs.unlinkSync(filepath);
-      deleted.push(file);
-    } else {
-      keptCount++;
-    }
-  }
+  const deleted = cleanupExpiredStates(command.days);
+  const keptCount = listStateFiles().length;
 
   return successResponse(command.id, { deleted, keptCount, days: command.days });
 }

@@ -19,6 +19,7 @@ import os from 'node:os';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import type { LaunchCommand } from './types.js';
 import { type RefMap, type EnhancedSnapshot, getEnhancedSnapshot, parseRef } from './snapshot.js';
+import { safeHeaderMerge } from './state-utils.js';
 
 // Screencast frame data from CDP
 export interface ScreencastFrame {
@@ -542,10 +543,7 @@ export class BrowserManager {
     const handler = async (route: Route) => {
       const requestHeaders = route.request().headers();
       await route.continue({
-        headers: {
-          ...requestHeaders,
-          ...headers,
-        },
+        headers: safeHeaderMerge(requestHeaders, headers),
       });
     };
 
