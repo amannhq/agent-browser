@@ -671,12 +671,15 @@ export class BrowserManager {
    * Close a Browserbase session via API
    */
   private async closeBrowserbaseSession(sessionId: string, apiKey: string): Promise<void> {
-    await fetch(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
+    const response = await fetch(`https://api.browserbase.com/v1/sessions/${sessionId}`, {
       method: 'DELETE',
       headers: {
         'X-BB-API-Key': apiKey,
       },
     });
+    if (!response.ok) {
+      throw new Error(`Failed to close Browserbase session: ${response.statusText}`);
+    }
   }
 
   /**
@@ -745,7 +748,7 @@ export class BrowserManager {
       this.browserbaseSessionId = session.id;
       this.browserbaseApiKey = browserbaseApiKey;
       this.browser = browser;
-      context.setDefaultTimeout(10000);
+      context.setDefaultTimeout(60000);
       this.contexts.push(context);
       this.pages.push(page);
       this.activePageIndex = 0;

@@ -1,7 +1,18 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+
+let tempHome: string;
+
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>();
+  return {
+    ...actual,
+    homedir: () => tempHome,
+  };
+});
+
 import {
   getAutoStateFilePath,
   isValidSessionName,
@@ -12,6 +23,14 @@ import {
 } from './state-utils.js';
 
 describe('state-utils', () => {
+  beforeEach(() => {
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-browser-test-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
   describe('isValidSessionName', () => {
     it('should accept alphanumeric names', () => {
       expect(isValidSessionName('twitter')).toBe(true);

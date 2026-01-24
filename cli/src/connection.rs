@@ -205,7 +205,8 @@ pub fn ensure_daemon(
     // Ensure socket directory exists
     let socket_dir = get_socket_dir();
     if !socket_dir.exists() {
-        fs::create_dir_all(&socket_dir).map_err(|e| format!("Failed to create socket directory: {}", e))?;
+        fs::create_dir_all(&socket_dir)
+            .map_err(|e| format!("Failed to create socket directory: {}", e))?;
     }
 
     let exe_path = env::current_exe().map_err(|e| e.to_string())?;
@@ -290,7 +291,7 @@ pub fn ensure_daemon(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        
+
         // On Windows, call node directly. Command::new handles PATH resolution (node.exe or node.cmd)
         // and automatically quotes arguments containing spaces.
         let mut cmd = Command::new("node");
@@ -446,7 +447,9 @@ mod tests {
         env::set_var("AGENT_BROWSER_SOCKET_DIR", "");
         env::remove_var("XDG_RUNTIME_DIR");
 
-        assert!(get_socket_dir().to_string_lossy().ends_with(".agent-browser"));
+        assert!(get_socket_dir()
+            .to_string_lossy()
+            .ends_with(".agent-browser"));
     }
 
     #[test]
@@ -456,7 +459,10 @@ mod tests {
         env::remove_var("AGENT_BROWSER_SOCKET_DIR");
         env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
 
-        assert_eq!(get_socket_dir(), PathBuf::from("/run/user/1000/agent-browser"));
+        assert_eq!(
+            get_socket_dir(),
+            PathBuf::from("/run/user/1000/agent-browser")
+        );
     }
 
     #[test]
@@ -466,7 +472,9 @@ mod tests {
         env::set_var("AGENT_BROWSER_SOCKET_DIR", "");
         env::set_var("XDG_RUNTIME_DIR", "");
 
-        assert!(get_socket_dir().to_string_lossy().ends_with(".agent-browser"));
+        assert!(get_socket_dir()
+            .to_string_lossy()
+            .ends_with(".agent-browser"));
     }
 
     #[test]
@@ -477,7 +485,10 @@ mod tests {
         env::remove_var("XDG_RUNTIME_DIR");
 
         let result = get_socket_dir();
-        assert!(result.to_string_lossy().ends_with(".agent-browser"));
-        assert!(result.to_string_lossy().contains("home") || result.to_string_lossy().contains("Users"));
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(result, home.join(".agent-browser"));
+        } else {
+            assert!(result.to_string_lossy().ends_with(".agent-browser"));
+        }
     }
 }
