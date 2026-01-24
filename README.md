@@ -218,58 +218,13 @@ agent-browser dialog dismiss          # Dismiss
 ```bash
 agent-browser trace start [path]      # Start recording trace
 agent-browser trace stop [path]       # Stop and save trace
-agent-browser console                 # View console messages
+agent-browser console                 # View console messages (log, error, warn, info)
 agent-browser console --clear         # Clear console
-agent-browser errors                  # View page errors
+agent-browser errors                  # View page errors (uncaught JavaScript exceptions)
 agent-browser errors --clear          # Clear errors
 agent-browser highlight <sel>         # Highlight element
-```
-
-### State Management
-
-```bash
-agent-browser state save <path>       # Save auth state to file
-agent-browser state load <path>       # Load auth state from file
-agent-browser state list              # List all saved state files
-agent-browser state show <file>       # Show details of a state file
-agent-browser state clear [name]      # Clear state files for session name
-agent-browser state clear --all       # Clear all saved state files
-agent-browser state clean --older-than <days>  # Delete old state files
-agent-browser state rename <old> <new>  # Rename a state file
-```
-
-#### State Encryption
-
-Protect sensitive session data with AES-256-GCM encryption:
-
-```bash
-# Generate a secure 256-bit key
-openssl rand -hex 32
-# Output: a1b2c3d4e5f6...  (64 hex characters)
-
-# Set the encryption key (add to your shell profile for persistence)
-export AGENT_BROWSER_ENCRYPTION_KEY="a1b2c3d4e5f6..."
-
-# Now all saved states are automatically encrypted
-agent-browser --session-name twitter open twitter.com --headed
-# After login, close browser
-agent-browser close
-
-# State file is encrypted - safe to backup/sync
-agent-browser state list
-# twitter-default.json (1.2KB, 2026-01-14) [encrypted]
-```
-
-#### Auto-Expiration
-
-State files are automatically deleted after 30 days by default:
-
-```bash
-# Change expiration (in days) - set to 0 to disable
-export AGENT_BROWSER_STATE_EXPIRE_DAYS=7
-
-# Or manually clean old files
-agent-browser state clean --older-than 30
+agent-browser state save <path>       # Save auth state
+agent-browser state load <path>       # Load auth state
 ```
 
 ### Navigation
@@ -316,146 +271,29 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
-## Automatic Session Persistence
+## Persistent Profiles
 
-Stay logged in across browser restarts with zero configuration:
-
-```bash
-# Set session name - that's it!
-agent-browser --session-name twitter open twitter.com --headed
-# ... login to Twitter ...
-agent-browser close  # Auto-saves authentication
-
-# Next time: already logged in!
-agent-browser --session-name twitter open twitter.com
-agent-browser snapshot  # See authenticated content
-```
-
-Or use environment variable:
+By default, browser state (cookies, localStorage, login sessions) is ephemeral and lost when the browser closes. Use `--profile` to persist state across browser restarts:
 
 ```bash
-export AGENT_BROWSER_SESSION_NAME=twitter
-agent-browser open twitter.com  # Auto-loads saved auth
+# Use a persistent profile directory
+agent-browser --profile ~/.myapp-profile open myapp.com
+
+# Login once, then reuse the authenticated session
+agent-browser --profile ~/.myapp-profile open myapp.com/dashboard
+
+# Or via environment variable
+AGENT_BROWSER_PROFILE=~/.myapp-profile agent-browser open myapp.com
 ```
 
-### How It Works
+The profile directory stores:
+- Cookies and localStorage
+- IndexedDB data
+- Service workers
+- Browser cache
+- Login sessions
 
-When `AGENT_BROWSER_SESSION_NAME` is set (via `--session-name` flag or env var), agent-browser automatically:
-1. **On Launch**: Checks for saved state in `~/.agent-browser/sessions/`
-2. **If Found**: Loads cookies and storage (you stay logged in)
-3. **On Close**: Saves current state for next time
-
-**Without `--session-name`**: Browser runs in ephemeral mode - no state is saved or loaded. Each session starts fresh.
-
-### Session Name Rules
-
-Session names must contain only alphanumeric characters, hyphens, and underscores. This prevents path traversal attacks and ensures safe file naming:
-
-```bash
-# Valid session names
-agent-browser --session-name my-project open example.com
-agent-browser --session-name test_session_v2 open example.com
-agent-browser --session-name MyApp123 open example.com
-
-# Invalid (rejected with error)
-agent-browser --session-name "../bad" open example.com     # path traversal
-agent-browser --session-name "my session" open example.com # spaces not allowed
-agent-browser --session-name "foo/bar" open example.com    # slashes not allowed
-```
-
-### Multiple Accounts
-
-Use different session names for different accounts:
-
-```bash
-# Personal Twitter
-agent-browser --session-name twitter-personal open twitter.com
-
-# Work Twitter  
-agent-browser --session-name twitter-work open twitter.com
-```
-
-### Switching Between Accounts
-
-Switch accounts by changing the session name:
-
-```bash
-# Login to account 1
-agent-browser --session-name twitter-account1 open twitter.com --headed
-# ... login ...
-agent-browser close
-
-# Login to account 2
-agent-browser --session-name twitter-account2 open twitter.com --headed
-# ... login ...
-agent-browser close
-
-# Switch between them anytime
-agent-browser --session-name twitter-account1 open twitter.com  # Account 1
-agent-browser close
-agent-browser --session-name twitter-account2 open twitter.com  # Account 2
-```
-
-### Combining with --session
-
-Combine `--session-name` with `--session` for complete isolation:
-
-```bash
-# Agent 1: Personal Gmail
-agent-browser --session-name gmail --session agent1 open gmail.com
-
-# Agent 2: Work Gmail
-agent-browser --session-name gmail-work --session agent2 open gmail.com
-```
-
-Each combination gets its own state file:
-- `~/.agent-browser/sessions/gmail-agent1.json`
-- `~/.agent-browser/sessions/gmail-work-agent2.json`
-
-### Logging Out / Clearing Sessions
-
-Several ways to logout or start fresh:
-
-```bash
-# Method 1: Use state management commands
-agent-browser state list                          # See all saved states
-agent-browser state show twitter-default.json     # View state details
-agent-browser state clear twitter                 # Clear all twitter-* states
-agent-browser state clear --all                   # Clear ALL saved states
-agent-browser state clean --older-than 30         # Delete states older than 30 days
-agent-browser state rename old-name new-name      # Rename a state file
-
-# Method 2: Delete the state file manually
-rm ~/.agent-browser/sessions/twitter-default.json
-
-# Method 3: Clear cookies via browser
-agent-browser --session-name twitter open twitter.com
-agent-browser cookies clear
-agent-browser close  # Saves state without cookies
-
-# Method 4: Use a new session name (fresh state)
-agent-browser --session-name twitter-fresh open twitter.com
-
-# Method 5: Run without --session-name (ephemeral, nothing saved)
-agent-browser open twitter.com  # Completely fresh, no persistence
-```
-
-### Starting Fresh (No Persistence)
-
-To run without any session persistence, simply omit `--session-name`:
-
-```bash
-# Ephemeral mode - no state saved or loaded
-agent-browser open twitter.com
-agent-browser close  # Nothing saved
-agent-browser open twitter.com  # Fresh browser again
-```
-
-### Security Notes
-
-- State files contain cookies and may include authentication tokens
-- Location: `~/.agent-browser/sessions/` (auto-created with 0600 permissions)
-- **Never commit state files to version control**
+**Tip**: Use different profile paths for different projects to keep their browser state isolated.
 
 ## Snapshot Options
 
@@ -482,9 +320,14 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | Option | Description |
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
-| `--session-name <name>` | Auto-save/load auth state (or `AGENT_BROWSER_SESSION_NAME` env) |
+| `--profile <path>` | Persistent browser profile directory (or `AGENT_BROWSER_PROFILE` env) |
 | `--headers <json>` | Set HTTP headers scoped to the URL's origin |
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
+| `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
+| `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
+| `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
+| `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
+| `-p, --provider <name>` | Cloud browser provider (or `AGENT_BROWSER_PROVIDER` env) |
 | `--json` | JSON output (for agents) |
 | `--full, -f` | Full page screenshot |
 | `--name, -n` | Locator name filter |
@@ -492,17 +335,6 @@ agent-browser snapshot -i -c -d 5         # Combine options
 | `--headed` | Show browser window (not headless) |
 | `--cdp <port>` | Connect via Chrome DevTools Protocol |
 | `--debug` | Debug output |
-
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `AGENT_BROWSER_SESSION` | Session name for browser isolation | `default` |
-| `AGENT_BROWSER_SESSION_NAME` | Session name for state persistence | - |
-| `AGENT_BROWSER_EXECUTABLE_PATH` | Custom browser binary path | - |
-| `AGENT_BROWSER_ENCRYPTION_KEY` | 64-char hex key for AES-256-GCM encryption | - |
-| `AGENT_BROWSER_STATE_EXPIRE_DAYS` | Auto-delete states older than N days | `30` |
-| `AGENT_BROWSER_DEBUG` | Enable debug output (`1` to enable) | - |
 
 ## Selectors
 
@@ -674,7 +506,14 @@ agent-browser close
 
 # Or pass --cdp on each command
 agent-browser --cdp 9222 snapshot
+
+# Connect to remote browser via WebSocket URL
+agent-browser --cdp "wss://your-browser-service.com/cdp?token=..." snapshot
 ```
+
+The `--cdp` flag accepts either:
+- A port number (e.g., `9222`) for local connections via `http://localhost:{port}`
+- A full WebSocket URL (e.g., `wss://...` or `ws://...`) for remote browser services
 
 This enables control of:
 - Electron apps
@@ -823,6 +662,16 @@ Use agent-browser to test the login flow. Run agent-browser --help to see availa
 
 The `--help` output is comprehensive and most agents can figure it out from there.
 
+### AI Coding Assistants
+
+Add the skill to your AI coding assistant for richer context:
+
+```bash
+npx skills add vercel-labs/agent-browser
+```
+
+This works with Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, Goose, OpenCode, and Windsurf.
+
 ### AGENTS.md / CLAUDE.md
 
 For more consistent results, add to your project or global instructions file:
@@ -837,58 +686,57 @@ Core workflow:
 2. `agent-browser snapshot -i` - Get interactive elements with refs (@e1, @e2)
 3. `agent-browser click @e1` / `fill @e2 "text"` - Interact using refs
 4. Re-snapshot after page changes
-
-Session persistence (stay logged in):
-- Use `--session-name <name>` to auto-save/load authentication
-- State files: `~/.agent-browser/sessions/{name}-default.json`
-- Without `--session-name`: ephemeral mode (fresh browser each time)
 ```
 
-### Session Persistence for Agents
+## Integrations
 
-AI agents can maintain authenticated sessions across runs:
+### Browserbase
+
+[Browserbase](https://browserbase.com) provides remote browser infrastructure to make deployment of agentic browsing agents easy. Use it when running the agent-browser CLI in an environment where a local browser isn't feasible.
+
+To enable Browserbase, use the `-p` flag:
 
 ```bash
-# First run: Login and save
-agent-browser --session-name twitter open twitter.com --headed
-# ... agent performs login ...
-agent-browser close  # Auto-saves to ~/.agent-browser/sessions/twitter-default.json
-
-# Subsequent runs: Already authenticated
-agent-browser --session-name twitter open twitter.com
-agent-browser snapshot -i  # See authenticated content
+export BROWSERBASE_API_KEY="your-api-key"
+export BROWSERBASE_PROJECT_ID="your-project-id"
+agent-browser -p browserbase open https://example.com
 ```
 
-**For multi-account agents:**
+Or use environment variables for CI/scripts:
 
 ```bash
-# Agent managing multiple accounts
-agent-browser --session-name twitter-bot1 open twitter.com  # Account 1
-agent-browser --session-name twitter-bot2 open twitter.com  # Account 2
+export AGENT_BROWSER_PROVIDER=browserbase
+export BROWSERBASE_API_KEY="your-api-key"
+export BROWSERBASE_PROJECT_ID="your-project-id"
+agent-browser open https://example.com
 ```
 
-**Ephemeral mode (no persistence):**
+When enabled, agent-browser connects to a Browserbase session instead of launching a local browser. All commands work identically.
+
+Get your API key and project ID from the [Browserbase Dashboard](https://browserbase.com/overview).
+
+### Browser Use
+
+[Browser Use](https://browser-use.com) provides cloud browser infrastructure for AI agents. Use it when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).
+
+To enable Browser Use, use the `-p` flag:
 
 ```bash
-# Run without --session-name for fresh browser each time
-agent-browser open twitter.com
+export BROWSER_USE_API_KEY="your-api-key"
+agent-browser -p browseruse open https://example.com
 ```
 
-### Claude Code Skill
-
-For Claude Code, a [skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices) provides richer context:
+Or use environment variables for CI/scripts:
 
 ```bash
-cp -r node_modules/agent-browser/skills/agent-browser .claude/skills/
+export AGENT_BROWSER_PROVIDER=browseruse
+export BROWSER_USE_API_KEY="your-api-key"
+agent-browser open https://example.com
 ```
 
-Or download:
+When enabled, agent-browser connects to a Browser Use cloud session instead of launching a local browser. All commands work identically.
 
-```bash
-mkdir -p .claude/skills/agent-browser
-curl -o .claude/skills/agent-browser/SKILL.md \
-  https://raw.githubusercontent.com/vercel-labs/agent-browser/main/skills/agent-browser/SKILL.md
-```
+Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys). Free credits are available to get started, with pay-as-you-go pricing after.
 
 ## License
 

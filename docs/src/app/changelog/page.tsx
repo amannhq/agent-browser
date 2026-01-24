@@ -6,6 +6,76 @@ export default function Changelog() {
       <div className="prose">
         <h1>Changelog</h1>
 
+        <h2 id="v0.7.1">v0.7.1</h2>
+        <p className="text-[#888] text-sm">January 2026</p>
+
+        <h3>Bug Fixes</h3>
+        <ul>
+          <li>
+            <strong>Fix native binary distribution</strong> - Native binaries for all platforms (Linux x64/arm64, macOS x64/arm64, Windows x64) are now included in the npm package. Previously, the release workflow published to npm before building binaries, causing &quot;No binary found&quot; errors on installation.
+          </li>
+        </ul>
+
+        <hr className="my-8 border-[#333]" />
+
+        <h2 id="v0.7.0">v0.7.0</h2>
+        <p className="text-[#888] text-sm">January 2026</p>
+
+        <h3>New Features</h3>
+        <ul>
+          <li>
+            <strong>Cloud browser providers</strong> - Connect to Browserbase or Browser Use for remote browser infrastructure
+            <CodeBlock code={`# Via -p flag (recommended)
+agent-browser -p browserbase open https://example.com
+agent-browser -p browseruse open https://example.com
+
+# Via environment variable
+export AGENT_BROWSER_PROVIDER=browserbase
+agent-browser open https://example.com`} />
+          </li>
+          <li>
+            <strong>Persistent browser profiles</strong> - Store cookies, localStorage, and login sessions across browser restarts
+            <CodeBlock code={`agent-browser --profile ~/.myapp-profile open myapp.com
+# Login persists across restarts`} />
+          </li>
+          <li>
+            <strong>Remote CDP WebSocket URLs</strong> - Connect to remote browser services via WebSocket
+            <CodeBlock code={`agent-browser --cdp "wss://browser-service.com/cdp?token=..." snapshot`} />
+          </li>
+          <li>
+            <strong><code>download</code> command</strong> - Trigger downloads and wait for completion
+            <CodeBlock code={`agent-browser download @e1 ./file.pdf
+agent-browser wait --download ./output.zip --timeout 30000`} />
+          </li>
+          <li>
+            <strong>Browser launch configuration</strong> - Fine-grained control over browser startup
+            <CodeBlock code={`agent-browser --args "--disable-gpu,--no-sandbox" open example.com
+agent-browser --user-agent "Custom UA" open example.com
+agent-browser --proxy-bypass "localhost,*.internal" open example.com`} />
+          </li>
+          <li>
+            <strong>Enhanced skills</strong> - Hierarchical structure with references and templates for Claude Code
+          </li>
+        </ul>
+
+        <h3>Bug Fixes</h3>
+        <ul>
+          <li>Screenshot command now supports refs and has improved error messages</li>
+          <li>WebSocket URLs work in <code>connect</code> command</li>
+          <li>Fixed socket file location (uses <code>~/.agent-browser</code> instead of TMPDIR)</li>
+          <li>Windows binary path fix (.exe extension)</li>
+          <li>State load and path-based actions now show correct output messages</li>
+        </ul>
+
+        <h3>Documentation</h3>
+        <ul>
+          <li>Added Claude Code marketplace plugin installation instructions</li>
+          <li>Updated skill documentation with references and templates</li>
+          <li>Improved error documentation</li>
+        </ul>
+
+        <hr className="my-8 border-[#333]" />
+
         <h2 id="v0.6.0">v0.6.0</h2>
         <p className="text-[#888] text-sm">January 2026</p>
 

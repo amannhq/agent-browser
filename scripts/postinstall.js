@@ -30,7 +30,7 @@ const packageJson = JSON.parse(
 const version = packageJson.version;
 
 // GitHub release URL
-const GITHUB_REPO = 'anthropics/agent-browser'; // Update this to your actual repo
+const GITHUB_REPO = 'vercel-labs/agent-browser';
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
 
 async function downloadFile(url, dest) {
@@ -68,7 +68,11 @@ async function downloadFile(url, dest) {
 async function main() {
   // Check if binary already exists
   if (existsSync(binaryPath)) {
-    console.log(`✓ Native binary already exists: ${binaryName}`);
+    // Ensure binary is executable (npm doesn't preserve execute bit)
+    if (platform() !== 'win32') {
+      chmodSync(binaryPath, 0o755);
+    }
+    console.log(`✓ Native binary ready: ${binaryName}`);
     return;
   }
 
