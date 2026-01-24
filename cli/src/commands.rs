@@ -1311,6 +1311,7 @@ mod tests {
             args: None,
             user_agent: None,
             provider: None,
+            session_name: None,
         }
     }
 
