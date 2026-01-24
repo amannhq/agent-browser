@@ -425,10 +425,14 @@ Examples:
             r##"
 agent-browser click - Click an element
 
-Usage: agent-browser click <selector>
+Usage: agent-browser click <selector> [--new-tab]
 
 Clicks on the specified element. The selector can be a CSS selector,
 XPath, or an element reference from snapshot (e.g., @e1).
+
+Options:
+  --new-tab            Open link in a new tab instead of navigating current tab
+                       (only works on elements with href attribute)
 
 Global Options:
   --json               Output as JSON
@@ -439,6 +443,7 @@ Examples:
   agent-browser click @e1
   agent-browser click "button.primary"
   agent-browser click "//button[@type='submit']"
+  agent-browser click @e3 --new-tab
 "##
         }
         "dblclick" => {
